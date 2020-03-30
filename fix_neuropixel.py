@@ -5,6 +5,15 @@ from uuid import uuid4
 
 
 def fix_pynwb_read(fpath):
+    """
+    Fix 2 problems that were blocking pynwb read in 1.3+:
+    1) some `timestamp` objects are of shape (2,n) when they should be of shape (n,)
+    2) There is a column named "name", which is creating problems
+
+    The file is modified in place.
+
+    :param fpath: str
+    """
 
     with File(fpath, 'r+') as f:
         # remove second row of timestamps
@@ -49,6 +58,14 @@ def fix_pynwb_read(fpath):
 
 
 def write_subject(fpath):
+    """
+    Take the meta-data in the custom meta-data extension and write them to the proper place in Subject.
+    We are not deleting them from their original location so that allensdk will still work.
+
+    The file is modified in place.
+
+    :param fpath: str
+    """
     with File(fpath, 'r+') as f:
 
         metadata = dict(f['/general/metadata'].attrs)
