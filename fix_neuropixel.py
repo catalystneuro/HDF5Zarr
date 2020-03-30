@@ -57,14 +57,19 @@ def write_subject(fpath):
             age='{} days'.format(metadata['age_in_days']),
             species='Mus musculus',
             genotype=metadata['full_genotype'],
-            subject_id=metadata['specimen_name'],
+            subject_id=metadata['specimen_name']
+        )
+
+        attributes = dict(
+            namespace='core',
+            neurodata_type='Subject',
+            object_id=str(uuid4()),
             description='strain: {}'.format(metadata['strain'])
         )
 
         f['/general'].create_group('subject')
-        f['general/subject'].attrs['namespace'] = 'core'
-        f['general/subject'].attrs['neurodata_type'] = 'Subject'
-        f['general/subject'].attrs['object_id'] = str(uuid4())
+        for key, val in attributes.items():
+            f['general/subject'].attrs[key] = val
 
         for key, val in dsets.items():
             f['general/subject'].create_dataset(key, data=val)
