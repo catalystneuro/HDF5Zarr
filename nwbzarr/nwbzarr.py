@@ -65,6 +65,8 @@ class NWBZarr(object):
 
         # Access NWB file
         self.file = h5py.File(nwbfile, mode=self.nwbfile_mode)
+        self.nwbfile = nwbfile
+
         if nwbgroup and not isinstance(nwbgroup, str):
             raise TypeError(f"Expected str for nwbgroup, recieved {type(nwbgroup)}")
         self.nwbgroup = nwbgroup
@@ -100,6 +102,7 @@ class NWBZarr(object):
         # dictionary to hold addresses of hdf5 objects in file
         self._address_dict = {}
 
+        self.changed_dsets = {}
         # create zarr format hierarchy for datasets and attributes compatible with NWB file,
         # dataset contents are not copied, unless allow_changing_string_type is False or
         # nwbfile_mode == 'r', and NWBFile contains variable-length strings
@@ -110,50 +113,32 @@ class NWBZarr(object):
         else:
             self.uri = nwbfile.path
 
+        # Create zarr hierarchy
+        self.nwb_zgroup = zarr.open_group(self.store, mode=self.store_mode, path=self.store_path)
+        if self.store is None:
+            self.store = self.nwb_zgroup.store
+        self.create_zarr_hierarchy(self.group, self.nwb_zgroup)
+        if isinstance(self.nwbfile, str):
+            fsspec_file = fsspec.open(self.nwbfile, mode='rb')
+            chunk_store = FileChunkStore(self.store, chunk_source=fsspec_file.open())
+        else:
+            chunk_store = FileChunkStore(self.store, chunk_source=self.nwbfile)
+        if LRU is True and not isinstance(chunk_store, zarr.LRUStoreCache):
+            chunk_store = zarr.LRUStoreCache(chunk_store, max_size=self.LRU_max_size)
+
+        # open zarr group
+        store_mode_cons = 'r' if self.store_mode == 'r' else 'r+'
         if self.consolidate_metadata:
-            # TO DO correct store_mode
-            if self.store_mode == 'r':
-                store_mode_cons = self.store_mode
-            else:
-                store_mode_cons = 'r+'
-                self.nwb_zgroup = zarr.group(self.store, overwrite=True, path=self.store_path)
-                if self.store is None:
-                    self.store = self.nwb_zgroup.store
-                self.create_zarr_hierarchy(self.group, self.nwb_zgroup)
-                zarr.convenience.consolidate_metadata(self.store, metadata_key=self.metadata_key)
-            if isinstance(nwbfile, str):
-                self.fsspec_file = fsspec.open(nwbfile, mode='rb')
-                chunk_store = FileChunkStore(self.store, chunk_source=self.fsspec_file.open())
-            else:
-                self.fsspec_file = nwbfile
-                chunk_store = FileChunkStore(self.store, chunk_source=nwbfile)
-
-            if LRU is True and not isinstance(chunk_store, zarr.LRUStoreCache):
-                chunk_store = zarr.LRUStoreCache(chunk_store, max_size=self.LRU_max_size)
-
+            zarr.convenience.consolidate_metadata(self.store, metadata_key=self.metadata_key)
             self.nwb_zgroup = zarr.convenience.open_consolidated(self.store, metadata_key=self.metadata_key,
                                                                  mode=store_mode_cons, chunk_store=chunk_store,
                                                                  path=self.store_path)
         else:
-            # TO DO correct store_mode
-            if self.store_mode == 'r':
-                store_mode_cons = self.store_mode
-            else:
-                store_mode_cons = 'r+'
-                self.nwb_zgroup = zarr.group(self.store, overwrite=True, path=self.store_path)
-                if self.store is None:
-                    self.store = self.nwb_zgroup.store
-                self.create_zarr_hierarchy(self.group, self.nwb_zgroup)
-            if isinstance(nwbfile, str):
-                self.fsspec_file = fsspec.open(nwbfile, mode='rb')
-                chunk_store = FileChunkStore(self.store, chunk_source=self.fsspec_file.open())
-            else:
-                self.fsspec_file = nwbfile
-                chunk_store = FileChunkStore(self.store, chunk_source=nwbfile)
-            if LRU is True and not isinstance(chunk_store, zarr.LRUStoreCache):
-                chunk_store = zarr.LRUStoreCache(chunk_store, max_size=self.LRU_max_size)
-
             self.nwb_zgroup = zarr.open_group(self.store, mode=store_mode_cons, path=self.store_path, chunk_store=chunk_store)
+
+        with self.file as hfile:
+            for dsetname in self.changed_dsets.keys():
+                del hfile[dsetname]
 
     def _fill_regfilters(self):
 
@@ -223,6 +208,11 @@ class NWBZarr(object):
                 if not val:
                     val = None
                 val = self.file[val].name
+                if val in self.changed_dsets:
+                    val = self.changed_dsets[val]
+                    h5obj.attrs[key] = self.file[val].ref
+                if h5py.check_vlen_dtype(self.file[val].dtype):
+                    print(f"Attribute value of type {type(val)} is not processed: Attribute {key} of object {h5obj.name}")
             elif isinstance(val, h5py.h5r.RegionReference):
                 print(f"Attribute value of type {type(val)} is not processed: Attribute {key} of object {h5obj.name}")
             elif isinstance(val, bytes):
@@ -329,8 +319,6 @@ class NWBZarr(object):
                     else:
                         compression = None
 
-                    info = self.storage_info(dset)
-
                     # TO DO compound dtype #
                     if dset.dtype.names:
                         # TO DO #
@@ -349,38 +337,28 @@ class NWBZarr(object):
                                 length_max = string_lengths_
                             else:
                                 length_max = max(len(el) for el in vlen_stringarr.flatten())
+                            if dset.fillvalue is not None:
+                                length_max = max(length_max, len(dset.fillvalue))
+                            length_max = length_max + (-length_max) % 8
                             dt_fixedlen = f'|S{length_max}'
 
+                            if isinstance(dset.fillvalue, str):
+                                dset_fillvalue = dset.fillvalue.encode('utf-8')
+                            else:
+                                dset_fillvalue = dset.fillvalue
+
                             if self.allow_changing_string_types and self.nwbfile_mode == 'r+':
-                                # TO DO, delete moved datasets
-                                affix_ = '_fixedlen~'
-                                if name.endswith(affix_):
+                                dset = self.strings_to_fixedlength(dset, h5py_group, vlen_stringarr,
+                                                                   dt_fixedlen, dset_fillvalue, compression)
+                                if dset is None:
                                     continue
-
-                                dset_name = dset.name
-                                h5py_group.file.move(dset_name, dset_name+affix_)
-                                dsetf = self.file.create_dataset(dset_name, shape=dset.shape,
-                                                                 dtype=dt_fixedlen,
-                                                                 compression=compression,
-                                                                 compression_opts=dset.compression_opts,
-                                                                 maxshape=dset.maxshape,
-                                                                 fillvalue=dset.fillvalue)
-                                if dsetf.shape == ():
-                                    if isinstance(vlen_stringarr, bytes):
-                                        dsetf[...] = vlen_stringarr
-                                    else:
-                                        dsetf[...] = vlen_stringarr.encode('utf-8')
-                                else:
-                                    dsetf[...] = vlen_stringarr.astype(dt_fixedlen)
-
-                                info = self.storage_info(dsetf)
-
-                                zarray = zgroup.create_dataset(dsetf.name, shape=dsetf.shape,
-                                                               dtype=dsetf.dtype,
-                                                               chunks=dsetf.chunks or False,
-                                                               fill_value=dsetf.fillvalue,
+                                zarray = zgroup.create_dataset(dset.name, shape=dset.shape,
+                                                               dtype=dt_fixedlen,
+                                                               chunks=dset.chunks or False,
+                                                               fill_value=dset_fillvalue,
                                                                compression=compression,
                                                                overwrite=True)
+
                             else:
                                 # TO DO #
                                 print(f"Dataset {dset.name} is not processed. Info: Variable-length dataset is not copied")
@@ -391,19 +369,20 @@ class NWBZarr(object):
                         print(f"Dataset {dset.name} is not processed: Dataset: {obj}")
                         continue
                     else:
-                        zarray = zgroup.create_dataset(obj.name, shape=obj.shape,
-                                                       dtype=obj.dtype,
-                                                       chunks=obj.chunks or False,
-                                                       fill_value=obj.fillvalue,
+                        zarray = zgroup.create_dataset(dset.name, shape=dset.shape,
+                                                       dtype=dset.dtype,
+                                                       chunks=dset.chunks or False,
+                                                       fill_value=dset.fillvalue,
                                                        compression=compression,
                                                        overwrite=True)
 
                     self.copy_attrs_data_to_zarr_store(dset, zarray)
+                    info = self.storage_info(dset)
 
                     # Store chunk location metadata...
                     if info:
                         info['source'] = {'uri': self.uri,
-                                          'array_name': obj.name}
+                                          'array_name': dset.name}
                         FileChunkStore.chunks_info(zarray, info)
 
             # Groups
@@ -421,6 +400,43 @@ class NWBZarr(object):
                   issubclass(obj_linkclass, h5py.SoftLink)):
                 group_ = obj
                 zgroup_ = self.nwb_zgroup.create_group(group_.name, overwrite=True)
+                self.copy_attrs_data_to_zarr_store(group_, zgroup_)
+
+    def strings_to_fixedlength(self, dset, h5py_group, vlen_stringarr, dt_fixedlen, dset_fillvalue, compression):
+
+        affix_ = '_fixedlen~'
+
+        if dset.name.endswith(affix_):
+            return None
+
+        dset_name = dset.name
+        h5py_group.file.move(dset_name, dset_name+affix_)
+        self.changed_dsets[dset_name+affix_] = dset_name
+        dsetf = self.file.create_dataset(dset_name, shape=dset.shape,
+                                         dtype=dt_fixedlen,
+                                         compression=compression,
+                                         compression_opts=dset.compression_opts,
+                                         maxshape=dset.maxshape,
+                                         fillvalue=dset_fillvalue)
+
+        # TO DO, copy attrs after all string dataset are moved
+        for key, val in dset.attrs.items():
+            if isinstance(val, (bytes, np.bool_, str, int, float, np.number)):
+                dsetf.attrs[key] = val
+            else:
+                # TO DO #
+                print(f"Moving variable-length string Datasets: attribute value of type\
+                        {type(val)} is not processed. Attribute {key} of object {dsetf.name}")
+
+        if dsetf.shape == ():
+            if isinstance(vlen_stringarr, bytes):
+                dsetf[...] = vlen_stringarr
+            else:
+                dsetf[...] = vlen_stringarr.encode('utf-8')
+        else:
+            dsetf[...] = vlen_stringarr.astype(dt_fixedlen)
+
+        return dsetf
 
 
 # from zarr.storage: #
