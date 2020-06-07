@@ -16,20 +16,21 @@ from zarr.util import json_dumps, json_loads
 class NWBZarr(object):
     """ class to create zarr structure for reading NWB files """
 
+
     def __init__(self, nwbfile: str = None, nwbgroup: str = None, nwbfile_mode: str = 'r',
                  store: Union[MutableMapping, str, Path] = None, store_path: str = None,
-                 allow_changing_string_types: bool = False, store_mode: str = 'a', consolidate_metadata: bool = True,
-                 metadata_key: str = '.zmetadata', LRU: bool = True, LRU_max_size: int = 2**30):
+                 store_mode: str = 'a',
+                 LRU: bool = True, LRU_max_size: int = 2**30):
+
         """
+      
         Args:
             nwbfile:                     str, path of NWB file to be read by zarr
             nwbgroup:                    str, hdf5 group in NWB file to be read by zarr
                                          along with its children. default is the root group.
             nwbfile_mode                 str, subset of h5py file access modes, nwbfile must exist
                                          'r'          readonly, default 'r'
-                                         'r+'         read and write, allows changing the hdf5 file if
-                                                      flag allow_changing_string_type is True,
-                                                      otherwise switches to 'r' mode
+                                         'r+'         read and write
             store:                       collections.abc.MutableMapping or str, zarr store.
                                          if string path is passed, zarr.DirectoryStore
                                          is created at the given path, if None, zarr.MemoryStore is used
@@ -41,13 +42,7 @@ class NWBZarr(object):
                                          'w'          create store, remove data if it exists
                                          'w-' or 'x'  create store, fail if exists
                                          'a'          read and write, create if it does not exist, default 'r'
-                                         If consolidate_metadata is True, only 'r' and 'r+' are allowed
             store_path:                  string, path in store
-            allow_changing_string_types: bool, if True, change variable string types if not compatible with zarr,
-                                         if False, copy string datasets to a zarr store
-            consolidate_metadata:        bool, flag whether to create a consolidated metadata file
-            metadata_key:                string, name of consolidated metadata file,
-                                         ignored if consolidate_metadata = False
             LRU:                         bool, if store is not already zarr.LRUStoreCache, add
                                          a zarr.LRUStoreCache store layer on top of currently used store
             LRU_max_size:                int, maximum zarr.LRUStoreCache cache size, only used
@@ -56,21 +51,7 @@ class NWBZarr(object):
         # Verify arguments
         if nwbfile_mode not in ('r', 'r+'):
             raise ValueError("nwbfile_mode must be 'r' or 'r+'")
-        if not isinstance(allow_changing_string_types, bool):
-            raise TypeError(f"Expected bool for allow_changing_string_types, recieved {type(allow_changing_string_types)}")
-        self.allow_changing_string_types = allow_changing_string_types
         self.nwbfile_mode = nwbfile_mode
-        if self.nwbfile_mode == 'r+' and not self.allow_changing_string_types:
-            self.nwbfile_mode = 'r'
-
-        # Access NWB file
-        self.file = h5py.File(nwbfile, mode=self.nwbfile_mode)
-        self.nwbfile = nwbfile
-
-        if nwbgroup and not isinstance(nwbgroup, str):
-            raise TypeError(f"Expected str for nwbgroup, recieved {type(nwbgroup)}")
-        self.nwbgroup = nwbgroup
-        self.group = self.file[self.nwbgroup] if self.nwbgroup else self.file
 
         # Verify arguments
         if not isinstance(LRU, bool):
@@ -79,13 +60,6 @@ class NWBZarr(object):
         if not isinstance(LRU_max_size, int):
             raise TypeError(f"Expected int for LRU_max_size, recieved {type(LRU_max_size)}")
         self.LRU_max_size = LRU_max_size
-
-        if not isinstance(consolidate_metadata, bool):
-            raise TypeError(f"Expected bool for consolidate_metadata, recieved {type(consolidate_metadata)}")
-        self.consolidate_metadata = consolidate_metadata
-        if not isinstance(metadata_key, str):
-            raise TypeError(f"Expected str for metadata_key, recieved {type(metadata_key)}")
-        self.metadata_key = metadata_key
 
         # store, store_path, and store_mode are passed through to zarr
         self.store_path = store_path
@@ -102,10 +76,12 @@ class NWBZarr(object):
         # dictionary to hold addresses of hdf5 objects in file
         self._address_dict = {}
 
-        self.changed_dsets = {}
         # create zarr format hierarchy for datasets and attributes compatible with NWB file,
-        # dataset contents are not copied, unless allow_changing_string_type is False or
-        # nwbfile_mode == 'r', and NWBFile contains variable-length strings
+        # dataset contents are not copied, unless it contains variable-length strings
+
+        self.nwb_zgroup = zarr.open_group(self.store, mode=self.store_mode, path=self.store_path)
+        if self.store is None:
+            self.store = self.nwb_zgroup.store
 
         # FileChunkStore requires uri
         if isinstance(nwbfile, str):
@@ -113,33 +89,39 @@ class NWBZarr(object):
         else:
             self.uri = nwbfile.path
 
-        # Create zarr hierarchy
-        self.nwb_zgroup = zarr.open_group(self.store, mode=self.store_mode, path=self.store_path)
-        if self.store is None:
-            self.store = self.nwb_zgroup.store
-        self.create_zarr_hierarchy(self.group, self.nwb_zgroup)
+        # Access NWB file and create zarr hierarchy
+        if nwbgroup and not isinstance(nwbgroup, str):
+            raise TypeError(f"Expected str for nwbgroup, recieved {type(nwbgroup)}")
+        self.nwbgroup = nwbgroup        
+        self.nwbfile = nwbfile
+        if self.store_mode != 'r':
+            self.file = h5py.File(self.nwbfile, mode=self.nwbfile_mode)
+            self.group = self.file[self.nwbgroup] if self.nwbgroup else self.file
+            self.create_zarr_hierarchy(self.group, self.nwb_zgroup)
+            self.file.close()
         if isinstance(self.nwbfile, str):
-            fsspec_file = fsspec.open(self.nwbfile, mode='rb')
-            chunk_store = FileChunkStore(self.store, chunk_source=fsspec_file.open())
+            self.chunkstore_file = fsspec.open(self.nwbfile, mode='rb')
+            self.chunk_store = FileChunkStore(self.store, chunk_source=self.chunkstore_file.open())
         else:
-            chunk_store = FileChunkStore(self.store, chunk_source=self.nwbfile)
+            self.chunk_store = FileChunkStore(self.store, chunk_source=self.nwbfile)
         if LRU is True and not isinstance(chunk_store, zarr.LRUStoreCache):
-            chunk_store = zarr.LRUStoreCache(chunk_store, max_size=self.LRU_max_size)
+            self.chunk_store = zarr.LRUStoreCache(chunk_store, max_size=self.LRU_max_size)
 
         # open zarr group
         store_mode_cons = 'r' if self.store_mode == 'r' else 'r+'
-        if self.consolidate_metadata:
-            zarr.convenience.consolidate_metadata(self.store, metadata_key=self.metadata_key)
-            self.nwb_zgroup = zarr.convenience.open_consolidated(self.store, metadata_key=self.metadata_key,
-                                                                 mode=store_mode_cons, chunk_store=chunk_store,
-                                                                 path=self.store_path)
-        else:
-            self.nwb_zgroup = zarr.open_group(self.store, mode=store_mode_cons, path=self.store_path, chunk_store=chunk_store)
+        self.nwb_zgroup = zarr.open_group(self.store, mode=store_mode_cons, path=self.store_path, chunk_store=self.chunk_store)
 
-        with self.file as hfile:
-            for dsetname in self.changed_dsets.keys():
-                del hfile[dsetname]
-
+    def consolidate_metadata(self, store, metadata_key='.zmetadata'):
+        '''
+        Wrapper over zarr.consolidate_metadata to pass chunk store when opening the zarr store
+        '''
+        zarr.consolidate_metadata(store, metadata_key = metadata_key)
+        store_mode_cons = 'r' if self.store_mode == 'r' else 'r+'
+        self.nwb_zgroup = zarr.open_consolidated(store, metadata_key=metadata_key,
+                                                 mode=store_mode_cons, chunk_store=self.nwb_zgroup.chunk_store,
+                                                 path=self.store_path)
+        return self.nwb_zgroup
+        
     def _fill_regfilters(self):
 
         # h5py.h5z.FILTER_DEFLATE == 1
@@ -205,14 +187,17 @@ class NWBZarr(object):
             # convert object references in attrs to str
             # e.g. h5py.h5r.Reference instance to "/processing/ophys/ImageSegmentation/ImagingPlane"
             if isinstance(val, h5py.h5r.Reference):
-                if not val:
+                if val:
+                    # not a null reference
+                    deref_obj = self.file[val]
+                    if deref_obj.name:
+                        val = self.file[val].name
+                        if h5py.check_vlen_dtype(deref_obj.dtype):
+                            print(f"Attribute value of type {type(val)} is not processed: Attribute {key} of object {h5obj.name}")
+                    else:
+                        print(f"Attribute value of type {type(val)} is not processed: Attribute {key} of object {h5obj.name}, anonymous target")
+                else:
                     val = None
-                val = self.file[val].name
-                if val in self.changed_dsets:
-                    val = self.changed_dsets[val]
-                    h5obj.attrs[key] = self.file[val].ref
-                if h5py.check_vlen_dtype(self.file[val].dtype):
-                    print(f"Attribute value of type {type(val)} is not processed: Attribute {key} of object {h5obj.name}")
             elif isinstance(val, h5py.h5r.RegionReference):
                 print(f"Attribute value of type {type(val)} is not processed: Attribute {key} of object {h5obj.name}")
             elif isinstance(val, bytes):
@@ -402,6 +387,108 @@ class NWBZarr(object):
                 zgroup_ = self.nwb_zgroup.create_group(group_.name, overwrite=True)
                 self.copy_attrs_data_to_zarr_store(group_, zgroup_)
 
+
+    @staticmethod
+    def _rewrite_vlen_to_fixed(h5py_group, changed_dsets = {}):
+        """  Scan NWB file or hdf5 group object and recursively convert variable-length string dataset to fixed-length
+        Args:
+          h5py_group: h5py.Group or h5py.File object
+        """
+
+        if (not isinstance(h5py_group, h5py.File) and
+            (not issubclass(h5py_group.file.get(h5py_group.name, getclass=True), h5py.Group) or
+             not issubclass(h5py_group.file.get(h5py_group.name, getclass=True, getlink=True), h5py.HardLink))):
+            raise TypeError(f"{h5py_group} should be a h5py.File or h5py.Group as a h5py.HardLink")
+
+        # iterate through group members
+        group_iter = [name for name in h5py_group.keys()]
+        for name in group_iter:
+            obj = h5py_group[name]
+
+            # get group member's link class
+            obj_linkclass = h5py_group.get(name, getclass=True, getlink=True)
+
+            # Datasets
+            if issubclass(h5py_group.get(name, getclass=True), h5py.Dataset):
+                if issubclass(obj_linkclass, h5py.ExternalLink):
+                    print(f"Skipped rewriting variable-length dataset {obj.name}: External Link")
+                    continue
+                dset = obj
+
+                # variable-length Datasets
+                if h5py.check_vlen_dtype(dset.dtype) and h5py.check_string_dtype(dset.dtype):
+
+                    # number of filters
+                    dcpl = dset.id.get_create_plist()
+                    nfilters = dcpl.get_nfilters()
+                    if nfilters > 1:
+                        # TO DO #
+                        print(f"Skipped rewriting variable-length dataset {dset.name} with multiple filters")
+                        continue
+                    elif nfilters == 1:
+                        # get first filter information
+                        filter_tuple = dset.id.get_create_plist().get_filter(0)
+                        filter_code = filter_tuple[0]
+                        if filter_code in self._hdf5_regfilters_subset and self._hdf5_regfilters_subset[filter_code] is not None:
+                            # TO DO
+                            compression = self._hdf5_regfilters_subset[filter_code](level=filter_tuple[2])
+                        else:
+                            print(f"Skipped rewriting variable-length dataset {dset.name} with compression filter \
+                                   {filter_tuple[3]}, hdf5 filter number {filter_tuple[0]} is not processed: \
+                                   no compatible zarr codec")
+                            continue
+                    else:
+                        compression = None
+                
+                    vlen_stringarr = dset[()]
+                    if dset.shape == ():
+                        string_lengths_ = len(vlen_stringarr)
+                        length_max = string_lengths_
+                    else:
+                        length_max = max(len(el) for el in vlen_stringarr.flatten())
+                    if dset.fillvalue is not None:
+                        length_max = max(length_max, len(dset.fillvalue))
+                    length_max = length_max + (-length_max) % 8
+                    dt_fixedlen = f'|S{length_max}'
+
+                    if isinstance(dset.fillvalue, str):
+                        dset_fillvalue = dset.fillvalue.encode('utf-8')
+                    else:
+                        dset_fillvalue = dset.fillvalue
+
+                    affix_ = '_fixedlen~'
+                    dset_name = dset.name
+                    h5py_group.file.move(dset_name, dset_name+affix_)
+                    changed_dsets[dset_name+affix_]=dset_name
+                    dsetf = h5py_group.file.create_dataset_like(dset_name,dset, dtype = dt_fixedlen, fillvalue=dset_fillvalue)
+                    
+                    # TO DO, copy attrs after all string dataset are moved
+                    for key, val in dset.attrs.items():
+                        if isinstance(val, (bytes, np.bool_, str, int, float, np.number)):
+                            dsetf.attrs[key] = val
+                        else:
+                            # TO DO #
+                            print(f"Moving variable-length string Datasets: attribute value of type\
+                                    {type(val)} is not processed. Attribute {key} of object {dsetf.name}")
+
+                    if dsetf.shape == ():
+                        if isinstance(vlen_stringarr, bytes):
+                            dsetf[...] = vlen_stringarr
+                        else:
+                            dsetf[...] = vlen_stringarr.encode('utf-8')
+                    else:
+                        dsetf[...] = vlen_stringarr.astype(dt_fixedlen)
+
+            # Groups
+            elif (issubclass(h5py_group.get(name, getclass=True), h5py.Group) and
+                  not issubclass(obj_linkclass, h5py.SoftLink)):
+                if issubclass(obj_linkclass, h5py.ExternalLink):
+                    print(f"Group {obj.name} is not processed: External Link")
+                    continue
+                changed_dsets = NWBZarr._rewrite_vlen_to_fixed(obj, changed_dsets)
+                
+        return changed_dsets
+
     def strings_to_fixedlength(self, dset, h5py_group, vlen_stringarr, dt_fixedlen, dset_fillvalue, compression):
 
         affix_ = '_fixedlen~'
@@ -411,7 +498,7 @@ class NWBZarr(object):
 
         dset_name = dset.name
         h5py_group.file.move(dset_name, dset_name+affix_)
-        self.changed_dsets[dset_name+affix_] = dset_name
+
         dsetf = self.file.create_dataset(dset_name, shape=dset.shape,
                                          dtype=dt_fixedlen,
                                          compression=compression,
@@ -579,3 +666,66 @@ class FileChunkStore(MutableMapping):
 
     def __setitem__(self, chunk_key):
         raise RuntimeError(f'{chunk_key}: Cannot modify chunk data')
+        
+
+def rewrite_vlen_to_fixed(h5py_group, update_references = False):
+    """  Scan NWB file or hdf5 group object and recursively convert variable-length string dataset to fixed-length
+    Args:
+      h5py_group: h5py.Group or h5py.File object
+    """
+    
+    if h5py_group.file.mode != 'r+':
+        raise ValueError(f"{h5py_group.file} mode must be 'r+' for rewriting variable-length datasets")
+
+    changed_dsets = NWBZarr._rewrite_vlen_to_fixed(h5py_group)
+
+    def _update_references(name, link_info):
+        nonlocal changed_dsets, h5py_group
+
+        if link_info.type == h5py.h5l.TYPE_EXTERNAL:
+            print(f"Object {obj.name} is not checked for dangling references: External Link")
+        elif link_info.type == h5py.h5l.TYPE_SOFT:
+            pass
+        else:
+            obj = h5py_group[name]
+            if isinstance(obj, h5py.Dataset):
+                dset = obj
+                if dset.dtype.names:
+                    # TO DO #
+                    print(f"Dataset {dset.name} is not checked for dangling references: compound dtype")
+                elif h5py.check_ref_dtype(dset.dtype) == h5py.RegionReference:
+                    # TO DO #
+                    print(f"Dataset {dset.name} is not checked for dangling references: Region Reference dtype")
+                elif h5py.check_ref_dtype(dset.dtype) == h5py.Reference:
+                    # TO DO #
+                    print(f"Dataset {dset.name} is not checked for dangling references")
+
+    if update_references:
+        h5py_group.id.links.visit(_update_references, info=True)
+
+    def _update_attr_references(name, link_info):
+        nonlocal changed_dsets, h5py_group
+
+        if link_info.type == h5py.h5l.TYPE_SOFT:
+            pass
+        else:
+            obj = h5py_group[name]
+            for key,val in obj.attrs.items():
+                if isinstance(val, h5py.RegionReference):
+                    print(f"Attribute {key} of {dset.name} is not checked for dangling references: Region Reference")
+                elif isinstance(val, h5py.Reference):
+                    if val:
+                        # not a null reference
+                        deref_obj = h5py_group.file[val]
+                        if deref_obj.name is None:
+                            # anonymous dataset
+                            pass
+                        elif deref_obj.name in changed_dsets:
+                            val = changed_dsets[deref_obj.name]
+                            obj.attrs[key] = h5py_group.file[val].ref
+
+    h5py_group.id.links.visit(_update_attr_references, info=True)
+
+    for dsetname in changed_dsets:
+        del h5py_group.file[dsetname]
+    

@@ -1,1 +1,1 @@
-from nwbzarr.nwbzarr import NWBZarr
+from .nwbzarr import *
