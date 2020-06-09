@@ -1,5 +1,6 @@
 import h5py
 import zarr
+from zarr.storage import array_meta_key
 import numpy as np
 from urllib.parse import urlparse, urlunparse
 import numcodecs
@@ -18,7 +19,7 @@ class NWBZarr(object):
 
     def __init__(self, nwbfile: str = None, nwbgroup: str = None, nwbfile_mode: str = 'r',
                  store: Union[MutableMapping, str, Path] = None, store_path: str = None,
-                 store_mode: str = 'a', LRU: bool = True, LRU_max_size: int = 2**30):
+                 store_mode: str = 'a', LRU: bool = False, LRU_max_size: int = 2**30):
 
         """
         Args:
@@ -189,7 +190,7 @@ class NWBZarr(object):
                     deref_obj = self.file[val]
                     if deref_obj.name:
                         val = self.file[val].name
-                        if h5py.check_vlen_dtype(deref_obj.dtype):
+                        if isinstance(deref_obj, h5py.Dataset) and h5py.check_vlen_dtype(deref_obj.dtype):
                             print(f"Attribute value of type {type(val)} is not processed: \
                                     Attribute {key} of object {h5obj.name}")
                     else:
@@ -214,7 +215,7 @@ class NWBZarr(object):
             except Exception:
                 print(f"Attribute value of type {type(val)} is not processed: Attribute {key} of object {h5obj.name}")
 
-    def storage_info(self, dset):
+    def storage_info(self, dset, dset_chunks):
         if dset.shape is None:
             # Null dataset
             return dict()
@@ -225,12 +226,29 @@ class NWBZarr(object):
             if dsid.get_offset() is None:
                 return dict()
             else:
-                key = (0,) * (len(dset.shape) or 1)
-                return {key: {'offset': dsid.get_offset(),
-                              'size': dsid.get_storage_size()}}
+                if dset_chunks is None:
+                    key = (0,) * (len(dset.shape) or 1)
+                    return {key: {'offset': dsid.get_offset(),
+                                  'size': dsid.get_storage_size()}}
+                else:
+                    stinfo = dict()
+
+                    bytes_offset = dsid.get_offset()
+                    storage_size = dsid.get_storage_size()
+                    key = (0,)*len(dset_chunks)                    
+
+                    offsets_, sizes_, chunk_indices = self._get_chunkstorage_info(dset, bytes_offset, dset.shape, storage_size, dset_chunks, key)
+
+                    for i in range(len(chunk_indices)):
+                        stinfo[(*chunk_indices[i], )] = {'offset': offsets_[i],
+                                                           'size': sizes_[i]}
+                                                         
+                    return stinfo
+            
         else:
             # Currently, this function only gets the number of all written chunks, regardless of the dataspace.
             # HDF5 1.10.5
+            # TO DO #
             num_chunks = dsid.get_num_chunks()
 
             if num_chunks == 0:
@@ -240,11 +258,40 @@ class NWBZarr(object):
             chunk_size = dset.chunks
             for index in range(num_chunks):
                 blob = dsid.get_chunk_info(index)
-                key = tuple(
-                    [a // b for a, b in zip(blob.chunk_offset, chunk_size)])
-                stinfo[key] = {'offset': blob.byte_offset,
-                               'size': blob.size}
+                key = tuple([a // b for a, b in zip(blob.chunk_offset, chunk_size)])
+                               
+                bytes_offset = blob.byte_offset
+                blob_size = blob.size
+                
+                offsets_, sizes_, chunk_indices = self._get_chunkstorage_info(dset, bytes_offset, chunk_size, blob_size, dset_chunks, key)
+                for i in range(len(chunk_indices)):
+                    stinfo[(*chunk_indices[i], )] = {'offset': offsets_[i],
+                                                       'size': sizes_[i]}
+                               
             return stinfo
+
+    def _get_chunkstorage_info(self, dset, bytes_offset, blob_shape, blob_size, dset_chunks, key):
+
+        chunk_maxind = np.ceil([a / b for a, b in zip(blob_shape, dset_chunks)]).astype(int)
+        chunk_indices = np.indices(chunk_maxind)\
+                          .transpose(*range(1, len(chunk_maxind)+1),0)\
+                          .reshape(np.prod(chunk_maxind), len(chunk_maxind))
+        
+        strides_ = np.empty(len(chunk_maxind), dtype=int)
+        strides_[-1] = dset_chunks[-1]*dset.dtype.itemsize
+        for dim_ in range(len(blob_shape)-1):
+            strides_[dim_] = dset_chunks[dim_]*np.prod(blob_shape[dim_+1:])*dset.dtype.itemsize
+        offsets_ = bytes_offset + np.sum(strides_*chunk_indices, axis = 1)
+        offsets_ = offsets_.tolist()
+
+        sizes_ = np.empty(len(chunk_indices), dtype=int)
+        sizes_[0:-1] = np.diff(offsets_)
+        sizes_[-1] = blob_size - (offsets_[-1] - bytes_offset)
+        sizes_ = sizes_.tolist()
+
+        chunk_indices = chunk_indices + np.array(key)*chunk_maxind
+
+        return offsets_, sizes_, chunk_indices
 
     def create_zarr_hierarchy(self, h5py_group, zgroup):
         """  Scan NWB file and recursively create zarr attributes, groups and dataset structures for accessing data
@@ -295,7 +342,14 @@ class NWBZarr(object):
                         filter_code = filter_tuple[0]
                         if filter_code in self._hdf5_regfilters_subset and self._hdf5_regfilters_subset[filter_code] is not None:
                             # TO DO
-                            compression = self._hdf5_regfilters_subset[filter_code](level=filter_tuple[2])
+                            if filter_code == 32001:
+                                # Blosc
+                                blosc_names = {0:'blosclz', 1: 'lz4', 2: 'lz4hc', 3: 'snappy', 4: 'zlib', 5: 'zstd'}                                
+                                clevel, shuffle, cname_id = filter_tuple[2][-3:]
+                                cname = blosc_names[cname_id]
+                                compression = self._hdf5_regfilters_subset[filter_code](cname=cname, clevel=clevel, shuffle=shuffle)
+                            else:
+                                compression = self._hdf5_regfilters_subset[filter_code](level=filter_tuple[2])
                         else:
                             print(f"Dataset {dset.name} with compression filter {filter_tuple[3]}, hdf5 filter number {filter_tuple[0]} is not processed:\
                                     no compatible zarr codec")
@@ -304,7 +358,7 @@ class NWBZarr(object):
                         compression = None
 
                     # TO DO compound dtype #
-                    if dset.dtype.names:
+                    if dset.dtype.names is not None:
                         # TO DO #
                         print(f"Dataset {dset.name} is not processed: compound dtype")
                         continue
@@ -323,15 +377,32 @@ class NWBZarr(object):
                         print(f"Dataset {dset.name} is not processed: Dataset: {obj}")
                         continue
                     else:
+                        if compression is None and (dset.chunks is None or dset.chunks == dset.shape):
+                            max_chunksize = 2**20
+                            dset_chunks = dset.chunks if dset.chunks else dset.shape
+                            if dset.shape !=():
+                                dim_ = 0
+                                dset_chunks = list(dset_chunks)
+                                while np.prod(dset_chunks)*dset.dtype.itemsize > max_chunksize:
+                                    ratio_ = np.prod(dset_chunks)*dset.dtype.itemsize/max_chunksize
+                                    chunk_dim_ = int(dset_chunks[dim_] // ratio_)
+                                    dset_chunks[dim_] = chunk_dim_ if chunk_dim_ else 1
+                                    dim_ += 1
+
+                                dset_chunks = tuple(dset_chunks)
+                            dset_chunks = dset_chunks or None                                
+                        else:
+                            dset_chunks = dset.chunks
+                            
                         zarray = zgroup.create_dataset(dset.name, shape=dset.shape,
                                                        dtype=dset.dtype,
-                                                       chunks=dset.chunks or False,
+                                                       chunks=dset_chunks or False,
                                                        fill_value=dset.fillvalue,
                                                        compression=compression,
                                                        overwrite=True)
 
                     self.copy_attrs_data_to_zarr_store(dset, zarray)
-                    info = self.storage_info(dset)
+                    info = self.storage_info(dset, dset_chunks)
 
                     # Store chunk location metadata...
                     if info:
@@ -540,7 +611,26 @@ class FileChunkStore(MutableMapping):
 
         # Read chunk's data...
         self._source.seek(chunk_loc['offset'], os.SEEK_SET)
-        return self._source.read(chunk_loc['size'])
+        bytes = self._source.read(chunk_loc['size'])
+        
+        try:
+            # Get array chunk size
+            zarray_key = self._get_array_key(chunk_key)
+            zarray_key = self._ensure_dict(self._store[zarray_key])
+            zarray_itemsize = np.dtype(zarray_key['dtype']).itemsize
+            zarray_chunksize = np.prod(zarray_key['chunks'])*zarray_itemsize
+            # Pad up to chunk size
+            if len(bytes)<zarray_chunksize:
+                bytes = bytes.ljust(zarray_chunksize, b'\0')
+           
+        except KeyError:
+            raise KeyError(chunk_key)
+
+        
+        return bytes
+
+    def _get_array_key(self, chunk_key):
+        return str(PurePosixPath(chunk_key).parent / array_meta_key)
 
     def __delitem__(self, chunk_key):
         raise RuntimeError(f'{chunk_key}: Cannot delete chunk')
