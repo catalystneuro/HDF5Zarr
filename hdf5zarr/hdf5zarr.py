@@ -14,19 +14,19 @@ from pathlib import PurePosixPath
 from zarr.util import json_dumps, json_loads
 
 
-class NWBZarr(object):
-    """ class to create zarr structure for reading NWB files """
+class HDF5Zarr(object):
+    """ class to create zarr structure for reading hdf5 files """
 
-    def __init__(self, nwbfile: str = None, nwbgroup: str = None, nwbfile_mode: str = 'r',
+    def __init__(self, filename: str = None, hdf5group: str = None, hdf5file_mode: str = 'r',
                  store: Union[MutableMapping, str, Path] = None, store_path: str = None,
                  store_mode: str = 'a', LRU: bool = False, LRU_max_size: int = 2**30):
 
         """
         Args:
-            nwbfile:                     str, path of NWB file to be read by zarr
-            nwbgroup:                    str, hdf5 group in NWB file to be read by zarr
+            filename:                    str or File-like object, file name string or File-like object to be read by zarr
+            hdf5group:                   str, hdf5 group in hdf5 file to be read by zarr
                                          along with its children. default is the root group.
-            nwbfile_mode                 str, subset of h5py file access modes, nwbfile must exist
+            hdf5file_mode                str, subset of h5py file access modes, filename must exist
                                          'r'          readonly, default 'r'
                                          'r+'         read and write
             store:                       collections.abc.MutableMapping or str, zarr store.
@@ -40,16 +40,16 @@ class NWBZarr(object):
                                          'w'          create store, remove data if it exists
                                          'w-' or 'x'  create store, fail if exists
                                          'a'          read and write, create if it does not exist, default 'r'
-            store_path:                  string, path in store
+            store_path:                  string, path in zarr store
             LRU:                         bool, if store is not already zarr.LRUStoreCache, add
                                          a zarr.LRUStoreCache store layer on top of currently used store
             LRU_max_size:                int, maximum zarr.LRUStoreCache cache size, only used
                                          if store is zarr.LRUStoreCache, or LRU argument is True
         """
         # Verify arguments
-        if nwbfile_mode not in ('r', 'r+'):
-            raise ValueError("nwbfile_mode must be 'r' or 'r+'")
-        self.nwbfile_mode = nwbfile_mode
+        if hdf5file_mode not in ('r', 'r+'):
+            raise ValueError("hdf5file_mode must be 'r' or 'r+'")
+        self.hdf5file_mode = hdf5file_mode
 
         # Verify arguments
         if not isinstance(LRU, bool):
@@ -74,40 +74,40 @@ class NWBZarr(object):
         # dictionary to hold addresses of hdf5 objects in file
         self._address_dict = {}
 
-        # create zarr format hierarchy for datasets and attributes compatible with NWB file,
+        # create zarr format hierarchy for datasets and attributes compatible with hdf5 file,
         # dataset contents are not copied, unless it contains variable-length strings
 
-        self.nwb_zgroup = zarr.open_group(self.store, mode=self.store_mode, path=self.store_path)
+        self.zgroup = zarr.open_group(self.store, mode=self.store_mode, path=self.store_path)
         if self.store is None:
-            self.store = self.nwb_zgroup.store
+            self.store = self.zgroup.store
 
         # FileChunkStore requires uri
-        if isinstance(nwbfile, str):
-            self.uri = nwbfile
+        if isinstance(filename, str):
+            self.uri = filename
         else:
-            self.uri = nwbfile.path
+            self.uri = filename.path
 
-        # Access NWB file and create zarr hierarchy
-        if nwbgroup and not isinstance(nwbgroup, str):
-            raise TypeError(f"Expected str for nwbgroup, recieved {type(nwbgroup)}")
-        self.nwbgroup = nwbgroup
-        self.nwbfile = nwbfile
+        # Access hdf5 file and create zarr hierarchy
+        if hdf5group and not isinstance(hdf5group, str):
+            raise TypeError(f"Expected str for hdf5group, recieved {type(hdf5group)}")
+        self.hdf5group = hdf5group
+        self.filename = filename
         if self.store_mode != 'r':
-            self.file = h5py.File(self.nwbfile, mode=self.nwbfile_mode)
-            self.group = self.file[self.nwbgroup] if self.nwbgroup else self.file
-            self.create_zarr_hierarchy(self.group, self.nwb_zgroup)
+            self.file = h5py.File(self.filename, mode=self.hdf5file_mode)
+            self.group = self.file[self.hdf5group] if self.hdf5group else self.file
+            self.create_zarr_hierarchy(self.group, self.zgroup)
             self.file.close()
-        if isinstance(self.nwbfile, str):
-            self.chunkstore_file = fsspec.open(self.nwbfile, mode='rb')
+        if isinstance(self.filename, str):
+            self.chunkstore_file = fsspec.open(self.filename, mode='rb')
             self.chunk_store = FileChunkStore(self.store, chunk_source=self.chunkstore_file.open())
         else:
-            self.chunk_store = FileChunkStore(self.store, chunk_source=self.nwbfile)
+            self.chunk_store = FileChunkStore(self.store, chunk_source=self.filename)
         if LRU is True and not isinstance(self.chunk_store, zarr.LRUStoreCache):
             self.chunk_store = zarr.LRUStoreCache(self.chunk_store, max_size=self.LRU_max_size)
 
         # open zarr group
         store_mode_cons = 'r' if self.store_mode == 'r' else 'r+'
-        self.nwb_zgroup = zarr.open_group(self.store, mode=store_mode_cons, path=self.store_path, chunk_store=self.chunk_store)
+        self.zgroup = zarr.open_group(self.store, mode=store_mode_cons, path=self.store_path, chunk_store=self.chunk_store)
 
     def consolidate_metadata(self, store, metadata_key='.zmetadata'):
         '''
@@ -115,10 +115,10 @@ class NWBZarr(object):
         '''
         zarr.consolidate_metadata(store, metadata_key=metadata_key)
         store_mode_cons = 'r' if self.store_mode == 'r' else 'r+'
-        self.nwb_zgroup = zarr.open_consolidated(store, metadata_key=metadata_key,
-                                                 mode=store_mode_cons, chunk_store=self.nwb_zgroup.chunk_store,
-                                                 path=self.store_path)
-        return self.nwb_zgroup
+        self.zgroup = zarr.open_consolidated(store, metadata_key=metadata_key,
+                                             mode=store_mode_cons, chunk_store=self.zgroup.chunk_store,
+                                             path=self.store_path)
+        return self.zgroup
 
     def _fill_regfilters(self):
 
@@ -294,7 +294,7 @@ class NWBZarr(object):
         return offsets_, sizes_, chunk_indices
 
     def create_zarr_hierarchy(self, h5py_group, zgroup):
-        """  Scan NWB file and recursively create zarr attributes, groups and dataset structures for accessing data
+        """  Scan hdf5 file and recursively create zarr attributes, groups and dataset structures for accessing data
         Args:
           h5py_group: h5py.Group or h5py.File object where information is gathered from
           zgroup:     Zarr Group
@@ -417,19 +417,19 @@ class NWBZarr(object):
                     print(f"Group {obj.name} is not processed: External Link")
                     continue
                 group_ = obj
-                zgroup_ = self.nwb_zgroup.create_group(group_.name, overwrite=True)
+                zgroup_ = self.zgroup.create_group(group_.name, overwrite=True)
                 self.create_zarr_hierarchy(group_, zgroup_)
 
             # Groups, Soft Link
             elif (issubclass(h5py_group.get(name, getclass=True), h5py.Group) and
                   issubclass(obj_linkclass, h5py.SoftLink)):
                 group_ = obj
-                zgroup_ = self.nwb_zgroup.create_group(group_.name, overwrite=True)
+                zgroup_ = self.zgroup.create_group(group_.name, overwrite=True)
                 self.copy_attrs_data_to_zarr_store(group_, zgroup_)
 
     @staticmethod
     def _rewrite_vlen_to_fixed(h5py_group, changed_dsets={}):
-        """  Scan NWB file or hdf5 group object and recursively convert variable-length string dataset to fixed-length
+        """  Scan hdf5 file or hdf5 group object and recursively convert variable-length string dataset to fixed-length
         Args:
           h5py_group: h5py.Group or h5py.File object
         """
@@ -502,7 +502,7 @@ class NWBZarr(object):
                 if issubclass(obj_linkclass, h5py.ExternalLink):
                     print(f"Group {obj.name} is not processed: External Link")
                     continue
-                changed_dsets = NWBZarr._rewrite_vlen_to_fixed(obj, changed_dsets)
+                changed_dsets = HDF5Zarr._rewrite_vlen_to_fixed(obj, changed_dsets)
 
         return changed_dsets
 
@@ -669,7 +669,7 @@ class FileChunkStore(MutableMapping):
 
 
 def rewrite_vlen_to_fixed(h5py_group, update_references=False):
-    """  Scan NWB file or hdf5 group object and recursively convert variable-length string dataset to fixed-length
+    """  Scan hdf5 file or hdf5 group object and recursively convert variable-length string dataset to fixed-length
     Args:
       h5py_group: h5py.Group or h5py.File object
     """
@@ -677,7 +677,7 @@ def rewrite_vlen_to_fixed(h5py_group, update_references=False):
     if h5py_group.file.mode != 'r+':
         raise ValueError(f"{h5py_group.file} mode must be 'r+' for rewriting variable-length datasets")
 
-    changed_dsets = NWBZarr._rewrite_vlen_to_fixed(h5py_group)
+    changed_dsets = HDF5Zarr._rewrite_vlen_to_fixed(h5py_group)
 
     def _update_references(name, link_info):
         nonlocal changed_dsets, h5py_group
