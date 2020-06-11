@@ -11,10 +11,9 @@ hfile = h5py.File(nwbfile_local,mode='r')
 # get dataset sizes
 dset_storagesize = {}
 def _info(name,hobj):
-    print(hobj)
     if isinstance(hobj,h5py.Dataset):
         dset_storagesize[name] = hobj.id.get_storage_size()
-    
+
 hfile.visititems(_info)
 
 # read csv file
@@ -50,10 +49,11 @@ sns.set_palette(sns_colors_)
 
 f = plt.figure(figsize=(18, 25))
 gs0 = gridspec.GridSpec(2, 1, figure=f, height_ratios = [7, 1])
-gs00 = gridspec.GridSpecFromSubplotSpec(1, 2, subplot_spec=gs0[0], wspace=0.05)
+wspace = 0.05
+gs00 = gridspec.GridSpecFromSubplotSpec(1, 2, subplot_spec=gs0[0], wspace=wspace)
 ax11 = f.add_subplot(gs00[0,0])
 ax12 = f.add_subplot(gs00[0,1])
-gs01 = gridspec.GridSpecFromSubplotSpec(1, 2, subplot_spec=gs0[1], wspace=0.05)
+gs01 = gridspec.GridSpecFromSubplotSpec(1, 2, subplot_spec=gs0[1], wspace=wspace)
 ax21 = f.add_subplot(gs01[0,0])
 ax22 = f.add_subplot(gs01[0,1])
 
@@ -100,25 +100,27 @@ ax12.set_xbound(xbound_)
 ax11.collections[0].zorder = ax11.collections[-1].zorder+1
 ax12.collections[0].zorder = ax11.collections[-1].zorder+1
 
+# add legend
 legend_ax12 = ax12.legend(legend_lines_ax11, legend_labels_ax11, loc="lower right")
 legend_ax12.set_title("")
 
-ax21 = sns.boxplot(x='time', y='test', ax=ax21, data=df_ax11)
-ax22 = sns.swarmplot(x="time", y="test", ax=ax22, data=df_ax12, color='k', marker='d')
+# add boxplot
+ax21 = sns.boxplot(x='time', y='test', ax=ax21, data=df)
+ax21.set_xbound(ax11.get_xbound())
+ax22 = sns.boxplot(x='time', y='test', ax=ax22, data=df)
+ax22.set_xbound(ax12.get_xbound())
 
-ax22.set_yticks(ax21.get_yticks())
-ax22.set_ybound(ax21.get_ybound())
-
+# add labels
 ax11.set_yticklabels(yticks_name_order)
 ax11.set_ylabel("Neuropixel Datasets")
-ax11.set_xlabel("Time (Sec)")
-ax21.set_xlabel("Time (Sec)")
+ax11.set_xlabel("Time (Sec)", x=1+wspace/2)
+ax21.set_xlabel("Time (Sec)", x=1+wspace/2)
 ax21.set_ylabel("")
 
 for ax in [ax12, ax22]:
     ax.set_yticklabels("")
-    ax.set_ylabel("")    
-    ax.set_xlabel("")    
+    ax.set_ylabel("")
+    ax.set_xlabel("")
     ax.xaxis.grid(False)
     ax.yaxis.grid(True)
 
