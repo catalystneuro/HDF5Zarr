@@ -19,7 +19,8 @@ class HDF5Zarr(object):
 
     def __init__(self, filename: str = None, hdf5group: str = None, hdf5file_mode: str = 'r',
                  store: Union[MutableMapping, str, Path] = None, store_path: str = None,
-                 store_mode: str = 'a', LRU: bool = False, LRU_max_size: int = 2**30):
+                 store_mode: str = 'a', LRU: bool = False, LRU_max_size: int = 2**30,
+                 max_chunksize=2*2**20):
 
         """
         Args:
@@ -45,6 +46,8 @@ class HDF5Zarr(object):
                                          a zarr.LRUStoreCache store layer on top of currently used store
             LRU_max_size:                int, maximum zarr.LRUStoreCache cache size, only used
                                          if store is zarr.LRUStoreCache, or LRU argument is True
+            max_chunksize:               maximum chunk size to use when creating zarr hierarchy, this is useful if
+                                         only a small slice of data needs to be read
         """
         # Verify arguments
         if hdf5file_mode not in ('r', 'r+'):
@@ -58,6 +61,9 @@ class HDF5Zarr(object):
         if not isinstance(LRU_max_size, int):
             raise TypeError(f"Expected int for LRU_max_size, recieved {type(LRU_max_size)}")
         self.LRU_max_size = LRU_max_size
+        if not isinstance(max_chunksize, int):
+            raise TypeError(f"Expected int for max_chunksize, recieved {type(max_chunksize)}")
+        self.max_chunksize = max_chunksize
 
         # store, store_path, and store_mode are passed through to zarr
         self.store_path = store_path
@@ -235,16 +241,17 @@ class HDF5Zarr(object):
 
                     bytes_offset = dsid.get_offset()
                     storage_size = dsid.get_storage_size()
-                    key = (0,)*len(dset_chunks)                    
+                    key = (0,)*len(dset_chunks)
 
-                    offsets_, sizes_, chunk_indices = self._get_chunkstorage_info(dset, bytes_offset, dset.shape, storage_size, dset_chunks, key)
+                    offsets_, sizes_, chunk_indices = self._get_chunkstorage_info(dset, bytes_offset, dset.shape,
+                                                                                  storage_size, dset_chunks, key)
 
                     for i in range(len(chunk_indices)):
                         stinfo[(*chunk_indices[i], )] = {'offset': offsets_[i],
-                                                           'size': sizes_[i]}
-                                                         
+                                                         'size': sizes_[i]}
+
                     return stinfo
-            
+
         else:
             # Currently, this function only gets the number of all written chunks, regardless of the dataspace.
             # HDF5 1.10.5
@@ -259,29 +266,30 @@ class HDF5Zarr(object):
             for index in range(num_chunks):
                 blob = dsid.get_chunk_info(index)
                 key = tuple([a // b for a, b in zip(blob.chunk_offset, chunk_size)])
-                               
+
                 bytes_offset = blob.byte_offset
                 blob_size = blob.size
-                
-                offsets_, sizes_, chunk_indices = self._get_chunkstorage_info(dset, bytes_offset, chunk_size, blob_size, dset_chunks, key)
+
+                offsets_, sizes_, chunk_indices = self._get_chunkstorage_info(dset, bytes_offset, chunk_size,
+                                                                              blob_size, dset_chunks, key)
                 for i in range(len(chunk_indices)):
                     stinfo[(*chunk_indices[i], )] = {'offset': offsets_[i],
-                                                       'size': sizes_[i]}
-                               
+                                                     'size': sizes_[i]}
+
             return stinfo
 
     def _get_chunkstorage_info(self, dset, bytes_offset, blob_shape, blob_size, dset_chunks, key):
 
         chunk_maxind = np.ceil([a / b for a, b in zip(blob_shape, dset_chunks)]).astype(int)
         chunk_indices = np.indices(chunk_maxind)\
-                          .transpose(*range(1, len(chunk_maxind)+1),0)\
+                          .transpose(*range(1, len(chunk_maxind)+1), 0)\
                           .reshape(np.prod(chunk_maxind), len(chunk_maxind))
-        
+
         strides_ = np.empty(len(chunk_maxind), dtype=int)
         strides_[-1] = dset_chunks[-1]*dset.dtype.itemsize
         for dim_ in range(len(blob_shape)-1):
             strides_[dim_] = dset_chunks[dim_]*np.prod(blob_shape[dim_+1:])*dset.dtype.itemsize
-        offsets_ = bytes_offset + np.sum(strides_*chunk_indices, axis = 1)
+        offsets_ = bytes_offset + np.sum(strides_*chunk_indices, axis=1)
         offsets_ = offsets_.tolist()
 
         sizes_ = np.empty(len(chunk_indices), dtype=int)
@@ -344,10 +352,11 @@ class HDF5Zarr(object):
                             # TO DO
                             if filter_code == 32001:
                                 # Blosc
-                                blosc_names = {0:'blosclz', 1: 'lz4', 2: 'lz4hc', 3: 'snappy', 4: 'zlib', 5: 'zstd'}                                
+                                blosc_names = {0: 'blosclz', 1: 'lz4', 2: 'lz4hc', 3: 'snappy', 4: 'zlib', 5: 'zstd'}
                                 clevel, shuffle, cname_id = filter_tuple[2][-3:]
                                 cname = blosc_names[cname_id]
-                                compression = self._hdf5_regfilters_subset[filter_code](cname=cname, clevel=clevel, shuffle=shuffle)
+                                compression = self._hdf5_regfilters_subset[filter_code](cname=cname, clevel=clevel,
+                                                                                        shuffle=shuffle)
                             else:
                                 compression = self._hdf5_regfilters_subset[filter_code](level=filter_tuple[2])
                         else:
@@ -378,22 +387,25 @@ class HDF5Zarr(object):
                         continue
                     else:
                         if compression is None and (dset.chunks is None or dset.chunks == dset.shape):
-                            max_chunksize = 2**20
+
                             dset_chunks = dset.chunks if dset.chunks else dset.shape
-                            if dset.shape !=():
-                                dim_ = 0
+                            if dset.shape != ():
                                 dset_chunks = list(dset_chunks)
-                                while np.prod(dset_chunks)*dset.dtype.itemsize > max_chunksize:
-                                    ratio_ = np.prod(dset_chunks)*dset.dtype.itemsize/max_chunksize
-                                    chunk_dim_ = int(dset_chunks[dim_] // ratio_)
-                                    dset_chunks[dim_] = chunk_dim_ if chunk_dim_ else 1
+                                dim_ = 0
+                                ratio_ = self.max_chunksize/(np.prod(dset_chunks)*dset.dtype.itemsize)
+                                while ratio_ < 1:
+                                    chunk_dim_ = int(ratio_*dset_chunks[dim_])
+                                    chunk_dim_ = chunk_dim_ if chunk_dim_ else 1
+                                    chunk_dim_ -= np.argmax(dset_chunks[dim_] % np.arange(chunk_dim_, chunk_dim_//2, -1))
+                                    dset_chunks[dim_] = int(chunk_dim_)
+                                    ratio_ = self.max_chunksize/(np.prod(dset_chunks)*dset.dtype.itemsize)
                                     dim_ += 1
 
                                 dset_chunks = tuple(dset_chunks)
-                            dset_chunks = dset_chunks or None                                
+                            dset_chunks = dset_chunks or None
                         else:
                             dset_chunks = dset.chunks
-                            
+
                         zarray = zgroup.create_dataset(dset.name, shape=dset.shape,
                                                        dtype=dset.dtype,
                                                        chunks=dset_chunks or False,
@@ -612,7 +624,7 @@ class FileChunkStore(MutableMapping):
         # Read chunk's data...
         self._source.seek(chunk_loc['offset'], os.SEEK_SET)
         bytes = self._source.read(chunk_loc['size'])
-        
+
         try:
             # Get array chunk size
             zarray_key = self._get_array_key(chunk_key)
@@ -620,13 +632,12 @@ class FileChunkStore(MutableMapping):
             zarray_itemsize = np.dtype(zarray_key['dtype']).itemsize
             zarray_chunksize = np.prod(zarray_key['chunks'])*zarray_itemsize
             # Pad up to chunk size
-            if len(bytes)<zarray_chunksize:
+            if len(bytes) < zarray_chunksize:
                 bytes = bytes.ljust(zarray_chunksize, b'\0')
-           
+
         except KeyError:
             raise KeyError(chunk_key)
 
-        
         return bytes
 
     def _get_array_key(self, chunk_key):
