@@ -17,7 +17,7 @@ from zarr.util import json_dumps, json_loads
 class HDF5Zarr(object):
     """ class to create zarr structure for reading hdf5 files """
 
-    def __init__(self, filename: str = None, hdf5group: str = None, hdf5file_mode: str = 'r',
+    def __init__(self, filename: str, hdf5group: str = None, hdf5file_mode: str = 'r',
                  store: Union[MutableMapping, str, Path] = None, store_path: str = None,
                  store_mode: str = 'a', LRU: bool = False, LRU_max_size: int = 2**30,
                  max_chunksize=2*2**20):
@@ -94,13 +94,13 @@ class HDF5Zarr(object):
             self.uri = filename.path
 
         # Access hdf5 file and create zarr hierarchy
-        if hdf5group and not isinstance(hdf5group, str):
+        if hdf5group is not None and not isinstance(hdf5group, str):
             raise TypeError(f"Expected str for hdf5group, recieved {type(hdf5group)}")
         self.hdf5group = hdf5group
         self.filename = filename
         if self.store_mode != 'r':
             self.file = h5py.File(self.filename, mode=self.hdf5file_mode)
-            self.group = self.file[self.hdf5group] if self.hdf5group else self.file
+            self.group = self.file[self.hdf5group] if self.hdf5group is not None else self.file
             self.create_zarr_hierarchy(self.group, self.zgroup)
             self.file.close()
         if isinstance(self.filename, str):
@@ -115,13 +115,13 @@ class HDF5Zarr(object):
         store_mode_cons = 'r' if self.store_mode == 'r' else 'r+'
         self.zgroup = zarr.open_group(self.store, mode=store_mode_cons, path=self.store_path, chunk_store=self.chunk_store)
 
-    def consolidate_metadata(self, store, metadata_key='.zmetadata'):
+    def consolidate_metadata(self, metadata_key='.zmetadata'):
         '''
         Wrapper over zarr.consolidate_metadata to pass chunk store when opening the zarr store
         '''
-        zarr.consolidate_metadata(store, metadata_key=metadata_key)
+        zarr.consolidate_metadata(self.store, metadata_key=metadata_key)
         store_mode_cons = 'r' if self.store_mode == 'r' else 'r+'
-        self.zgroup = zarr.open_consolidated(store, metadata_key=metadata_key,
+        self.zgroup = zarr.open_consolidated(self.store, metadata_key=metadata_key,
                                              mode=store_mode_cons, chunk_store=self.zgroup.chunk_store,
                                              path=self.store_path)
         return self.zgroup
@@ -679,7 +679,22 @@ class FileChunkStore(MutableMapping):
         raise RuntimeError(f'{chunk_key}: Cannot modify chunk data')
 
 
-def rewrite_vlen_to_fixed(h5py_group, update_references=False):
+def rewrite_vlen_to_fixed(filename: str, group: str = None, update_references=False):
+    """  Scan hdf5 file or hdf5 group object and recursively convert variable-length string dataset to fixed-length
+    Args:
+      filename:   str or File-like object, hdf5 file
+      group:      str, hdf5 group in hdf5 file to recursively convert variable-lengths strings, default is the root group.
+    """
+
+    if group is not None and not isinstance(group, str):
+        raise TypeError(f"Expected str for group, recieved {type(group)}")
+
+    with h5py.File(filename, mode='r+') as hfile:
+        obj = hfile[group] if group is not None else hfile
+        _rewrite_vlen_to_fixed(obj, update_references=update_references)
+
+
+def _rewrite_vlen_to_fixed(h5py_group, update_references=False):
     """  Scan hdf5 file or hdf5 group object and recursively convert variable-length string dataset to fixed-length
     Args:
       h5py_group: h5py.Group or h5py.File object
