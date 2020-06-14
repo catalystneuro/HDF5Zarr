@@ -22,7 +22,7 @@ rewrite_vlen_to_fixed(file_name)
 
 # Local read
 hdf5_zarr = HDF5Zarr(file_name)
-# Without indicating a speicific zarr store, zarr uses the default zarr.MemoryStore
+# Without indicating a specific zarr store, zarr uses the default zarr.MemoryStore
 # alternatively pass a zarr store such as:
 # store = zarr.DirectoryStore('storezarr')
 # hdf5_zarr = HDF5Zarr(file_name, store = store, store_mode = 'w')
