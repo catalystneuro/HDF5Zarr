@@ -14,7 +14,6 @@ from hdf5zarr import HDF5Zarr
 from hdf5zarr import rewrite_vlen_to_fixed
 import zarr
 import fsspec
-import s3fs
 
 file_name = 'ecephys.nwb'
 
@@ -51,7 +50,7 @@ with open(metadata_file, 'r') as f:
 
 store = metadata_dict
 with fs.open('bucketname/' + file_name, 'rb') as f:
-    hdf5_zarr = HDF5Zarr(file_name, store = store, store_mode = 'r')
+    hdf5_zarr = HDF5Zarr(f, store = store, store_mode = 'r')
     zgroup = hdf5_zarr.zgroup
     # print dataset names
     zgroup.tree()
