@@ -9,6 +9,7 @@ import hdf5plugin
 from typing import Union
 import os
 from pathlib import Path
+import io
 from collections.abc import MutableMapping
 from pathlib import PurePosixPath
 from zarr.util import json_dumps, json_loads
@@ -90,6 +91,8 @@ class HDF5Zarr(object):
         # FileChunkStore requires uri
         if isinstance(filename, str):
             self.uri = filename
+        elif isinstance(filename, io.IOBase):
+            self.uri = filename.name
         else:
             self.uri = filename.path
 
@@ -333,94 +336,137 @@ class HDF5Zarr(object):
                     print(f"Dataset {obj.name} is not processed: External Link")
                     continue
                 dset = obj
-                if dset.dtype.kind == 'V':
+
+                # number of filters
+                dcpl = dset.id.get_create_plist()
+                nfilters = dcpl.get_nfilters()
+                if nfilters > 1:
                     # TO DO #
-                    print(f"Dataset {dset.name} of dtype {dset.dtype.kind} is not processed")
+                    print(f"Dataset {dset.name} with multiple filters is not processed")
+                    continue
+                elif nfilters == 1:
+                    # get first filter information
+                    filter_tuple = dset.id.get_create_plist().get_filter(0)
+                    filter_code = filter_tuple[0]
+                    if filter_code in self._hdf5_regfilters_subset and self._hdf5_regfilters_subset[filter_code] is not None:
+                        # TO DO
+                        if filter_code == 32001:
+                            # Blosc
+                            blosc_names = {0: 'blosclz', 1: 'lz4', 2: 'lz4hc', 3: 'snappy', 4: 'zlib', 5: 'zstd'}
+                            clevel, shuffle, cname_id = filter_tuple[2][-3:]
+                            cname = blosc_names[cname_id]
+                            compression = self._hdf5_regfilters_subset[filter_code](cname=cname, clevel=clevel,
+                                                                                    shuffle=shuffle)
+                        else:
+                            compression = self._hdf5_regfilters_subset[filter_code](level=filter_tuple[2])
+                    else:
+                        print(f"Dataset {dset.name} with compression filter {filter_tuple[3]}, hdf5 filter number {filter_tuple[0]} is not processed:\
+                                no compatible zarr codec")
+                        continue
                 else:
-                    # number of filters
-                    dcpl = dset.id.get_create_plist()
-                    nfilters = dcpl.get_nfilters()
-                    if nfilters > 1:
-                        # TO DO #
-                        print(f"Dataset {dset.name} with multiple filters is not processed")
-                        continue
-                    elif nfilters == 1:
-                        # get first filter information
-                        filter_tuple = dset.id.get_create_plist().get_filter(0)
-                        filter_code = filter_tuple[0]
-                        if filter_code in self._hdf5_regfilters_subset and self._hdf5_regfilters_subset[filter_code] is not None:
-                            # TO DO
-                            if filter_code == 32001:
-                                # Blosc
-                                blosc_names = {0: 'blosclz', 1: 'lz4', 2: 'lz4hc', 3: 'snappy', 4: 'zlib', 5: 'zstd'}
-                                clevel, shuffle, cname_id = filter_tuple[2][-3:]
-                                cname = blosc_names[cname_id]
-                                compression = self._hdf5_regfilters_subset[filter_code](cname=cname, clevel=clevel,
-                                                                                        shuffle=shuffle)
+                    compression = None
+
+                if dset.dtype.names is not None:
+                    # Structured array with Reference dtype
+
+                    dset_type = dset.id.get_type()
+                    dt_nmembers = dset_type.get_nmembers()
+
+                    dtype_ = []
+                    dset_fillvalue = list(dset.fillvalue)
+                    for dt_i in range(dt_nmembers):
+                        dtname = dset.dtype.names[dt_i]
+                        if dset_type.get_member_class(dt_i) == h5py.h5t.REFERENCE:
+                            fcid = dset.file.id.get_create_plist()
+                            unit_address_size, _ = fcid.get_sizes()
+                            dtype_ += [(dtname, np.dtype(f'uint{unit_address_size*8}'))]
+                            if dset.fillvalue[dt_i]:
+                                dset_fillvalue[dt_i] = h5py.h5o.get_info([h5py.h5r.dereference(
+                                                                          dset.fillvalue[dt_i], self.file.id)]).addr
                             else:
-                                compression = self._hdf5_regfilters_subset[filter_code](level=filter_tuple[2])
+                                dset_fillvalue[dt_i] = 0
                         else:
-                            print(f"Dataset {dset.name} with compression filter {filter_tuple[3]}, hdf5 filter number {filter_tuple[0]} is not processed:\
-                                    no compatible zarr codec")
-                            continue
-                    else:
-                        compression = None
+                            dtype_ += [(dtname, dset.dtype.base[dt_i])]
+                    zarray = zgroup.create_dataset(dset.name, shape=dset.shape,
+                                                   dtype=dtype_,
+                                                   chunks=dset.chunks or False,
+                                                   fill_value=tuple(dset_fillvalue),
+                                                   compression=compression,
+                                                   overwrite=True)
 
-                    # TO DO compound dtype #
-                    if dset.dtype.names is not None:
+                # variable-length Datasets
+                elif h5py.check_vlen_dtype(dset.dtype):
+                    if not h5py.check_string_dtype(dset.dtype):
                         # TO DO #
-                        print(f"Dataset {dset.name} is not processed: compound dtype")
-                        continue
-                    # variable-length Datasets
-                    if h5py.check_vlen_dtype(dset.dtype):
-                        if not h5py.check_string_dtype(dset.dtype):
-                            # TO DO #
-                            print(f"Dataset {dset.name} is not processed: Variable-length dataset, not string")
-                            continue
-                        else:
-                            print(f"Dataset {dset.name} is not processed: variable-length string dataset")
-                            continue
-
-                    elif dset.dtype.hasobject:
-                        # TO DO #
-                        print(f"Dataset {dset.name} is not processed: Dataset: {obj}")
+                        print(f"Dataset {dset.name} is not processed: Variable-length dataset, not string")
                         continue
                     else:
-                        if compression is None and (dset.chunks is None or dset.chunks == dset.shape):
+                        print(f"Dataset {dset.name} is not processed: variable-length string dataset")
+                        continue
 
-                            dset_chunks = dset.chunks if dset.chunks else dset.shape
-                            if dset.shape != ():
-                                dset_chunks = list(dset_chunks)
-                                dim_ = 0
-                                ratio_ = self.max_chunksize/(np.prod(dset_chunks)*dset.dtype.itemsize)
-                                while ratio_ < 1:
-                                    chunk_dim_ = int(ratio_*dset_chunks[dim_])
-                                    chunk_dim_ = chunk_dim_ if chunk_dim_ else 1
-                                    chunk_dim_ -= np.argmax(dset_chunks[dim_] % np.arange(chunk_dim_, chunk_dim_//2, -1))
-                                    dset_chunks[dim_] = int(chunk_dim_)
-                                    ratio_ = self.max_chunksize/(np.prod(dset_chunks)*dset.dtype.itemsize)
-                                    dim_ += 1
+                elif dset.dtype.hasobject:
+                    # TO DO test #
+                    dset_type = dset.id.get_type()
 
-                                dset_chunks = tuple(dset_chunks)
-                            dset_chunks = dset_chunks or None
+                    if dset_type.get_class() == h5py.h5t.REFERENCE:
+                        fcid = dset.file.id.get_create_plist()
+                        unit_address_size, _ = fcid.get_sizes()
+                        dtype_ = np.dtype(f'uint{unit_address_size*8}')
+                        if dset.fillvalue:
+                            dset_fillvalue = h5py.h5o.get_info([h5py.h5r.dereference(dset.fillvalue, self.file.id)]).addr
                         else:
-                            dset_chunks = dset.chunks
+                            dset_fillvalue = 0
 
                         zarray = zgroup.create_dataset(dset.name, shape=dset.shape,
-                                                       dtype=dset.dtype,
-                                                       chunks=dset_chunks or False,
-                                                       fill_value=dset.fillvalue,
+                                                       dtype=dtype_,
+                                                       chunks=dset.chunks or False,
+                                                       fill_value=dset_fillvalue,
                                                        compression=compression,
                                                        overwrite=True)
 
-                    self.copy_attrs_data_to_zarr_store(dset, zarray)
-                    info = self.storage_info(dset, dset_chunks)
+                    elif dset_type.get_class() == h5py.h5t.STD_REF_DSETREG:
+                        print(f"Dataset {dset.name} is not processed: Region Reference dtype")
+                        continue
+                    else:
+                        print(f"Dataset {dset.name} is not processed: Object dtype")
+                        continue
 
-                    # Store chunk location metadata...
-                    if info:
-                        info['source'] = {'uri': self.uri,
-                                          'array_name': dset.name}
-                        FileChunkStore.chunks_info(zarray, info)
+                else:
+                    if compression is None and (dset.chunks is None or dset.chunks == dset.shape):
+
+                        dset_chunks = dset.chunks if dset.chunks else dset.shape
+                        if dset.shape != ():
+                            dset_chunks = list(dset_chunks)
+                            dim_ = 0
+                            ratio_ = self.max_chunksize/(np.prod(dset_chunks)*dset.dtype.itemsize)
+                            while ratio_ < 1:
+                                chunk_dim_ = int(ratio_*dset_chunks[dim_])
+                                chunk_dim_ = chunk_dim_ if chunk_dim_ else 1
+                                chunk_dim_ -= np.argmax(dset_chunks[dim_] % np.arange(chunk_dim_, chunk_dim_//2, -1))
+                                dset_chunks[dim_] = int(chunk_dim_)
+                                ratio_ = self.max_chunksize/(np.prod(dset_chunks)*dset.dtype.itemsize)
+                                dim_ += 1
+
+                            dset_chunks = tuple(dset_chunks)
+                        dset_chunks = dset_chunks or None
+                    else:
+                        dset_chunks = dset.chunks
+
+                    zarray = zgroup.create_dataset(dset.name, shape=dset.shape,
+                                                   dtype=dset.dtype,
+                                                   chunks=dset_chunks or False,
+                                                   fill_value=dset.fillvalue,
+                                                   compression=compression,
+                                                   overwrite=True)
+
+                self.copy_attrs_data_to_zarr_store(dset, zarray)
+                info = self.storage_info(dset, dset_chunks)
+
+                # Store chunk location metadata...
+                if info:
+                    info['source'] = {'uri': self.uri,
+                                      'array_name': dset.name}
+                    FileChunkStore.chunks_info(zarray, info)
 
             # Groups
             elif (issubclass(h5py_group.get(name, getclass=True), h5py.Group) and
@@ -629,7 +675,12 @@ class FileChunkStore(MutableMapping):
             # Get array chunk size
             zarray_key = self._get_array_key(chunk_key)
             zarray_key = self._ensure_dict(self._store[zarray_key])
-            zarray_itemsize = np.dtype(zarray_key['dtype']).itemsize
+            dtype_str = zarray_key['dtype']
+            # compound dtype
+            if isinstance(dtype_str, list):
+                dtype_str = [tuple(el) for el in dtype_str]
+
+            zarray_itemsize = np.dtype(dtype_str).itemsize
             zarray_chunksize = np.prod(zarray_key['chunks'])*zarray_itemsize
             # Pad up to chunk size
             if len(bytes) < zarray_chunksize:
