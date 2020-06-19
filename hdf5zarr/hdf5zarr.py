@@ -9,10 +9,10 @@ import hdf5plugin
 from typing import Union
 import os
 from pathlib import Path
-import io
 from collections.abc import MutableMapping
 from pathlib import PurePosixPath
 from zarr.util import json_dumps, json_loads
+SYMLINK = '.link'
 
 
 class HDF5Zarr(object):
@@ -91,10 +91,13 @@ class HDF5Zarr(object):
         # FileChunkStore requires uri
         if isinstance(filename, str):
             self.uri = filename
-        elif isinstance(filename, io.IOBase):
-            self.uri = filename.name
         else:
-            self.uri = filename.path
+            try:
+                self.uri = getattr(filename, 'path', None)
+                if self.uri is None:
+                    self.uri = filename.name
+            except:
+                self.uri = ''
 
         # Access hdf5 file and create zarr hierarchy
         if hdf5group is not None and not isinstance(hdf5group, str):
@@ -484,6 +487,9 @@ class HDF5Zarr(object):
                 group_ = obj
                 zgroup_ = self.zgroup.create_group(group_.name, overwrite=True)
                 self.copy_attrs_data_to_zarr_store(group_, zgroup_)
+
+                zgroup_path = zgroup_.create_group(SYMLINK, overwrite=True)
+                zgroup_path.attrs[group_.name] = h5py_group.get(name, getlink=True).path
 
     @staticmethod
     def _rewrite_vlen_to_fixed(h5py_group, changed_dsets={}):
