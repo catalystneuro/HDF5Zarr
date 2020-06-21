@@ -151,13 +151,13 @@ class HDF5Zarr(object):
 
         # Verify arguments
         if not isinstance(LRU, bool):
-            raise TypeError(f"Expected bool for LRU, recieved {type(LRU)}")
+            raise TypeError(f"Expected bool for LRU, received {type(LRU)}")
         self.LRU = LRU
         if not isinstance(LRU_max_size, int):
-            raise TypeError(f"Expected int for LRU_max_size, recieved {type(LRU_max_size)}")
+            raise TypeError(f"Expected int for LRU_max_size, received {type(LRU_max_size)}")
         self.LRU_max_size = LRU_max_size
         if not isinstance(max_chunksize, int):
-            raise TypeError(f"Expected int for max_chunksize, recieved {type(max_chunksize)}")
+            raise TypeError(f"Expected int for max_chunksize, received {type(max_chunksize)}")
         self.max_chunksize = max_chunksize
 
         # store, store_path, and store_mode are passed through to zarr
