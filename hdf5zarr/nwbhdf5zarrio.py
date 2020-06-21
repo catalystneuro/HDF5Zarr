@@ -2,12 +2,12 @@ import zarr
 from collections.abc import MutableMapping
 from collections import deque
 from functools import partial
-from hdmf.utils import docval, popargs
+from hdmf.utils import call_docval_func, docval, popargs, getargs
 from hdmf.backends.hdf5 import HDF5IO as _HDF5IO
 from hdmf.build import BuildManager, TypeMap, GroupBuilder, LinkBuilder, DatasetBuilder, ReferenceBuilder
 from hdmf.query import HDMFDataset
 from hdmf.query import Array as HDMFArray
-from hdmf.backends.hdf5.h5_utils import BuilderH5ReferenceDataset, BuilderH5TableDataset
+from hdmf.backends.hdf5.h5_utils import BuilderH5ReferenceDataset, BuilderH5TableDataset, H5SpecReader
 from hdmf.backends.warnings import BrokenLinkWarning
 from hdmf.backends.io import UnsupportedOperation
 from hdmf.spec import NamespaceCatalog
@@ -21,6 +21,17 @@ HDMFDataset.register(zarr.Array)
 from .hdf5zarr import SYMLINK
 ROOT_NAME = 'root'
 SPEC_LOC_ATTR = '.specloc'
+
+
+class ZarrSpecReader(H5SpecReader):
+
+    @docval({'name': 'group', 'type': zarr.Group, 'doc': 'the zarr Group to read specs from'})
+    def __init__(self, **kwargs):
+        group = getargs('group', kwargs)
+        self._H5SpecReader__group = group
+        super_kwargs = {'source': "%s:%s" % (os.path.abspath(group.file.name), group.name)}
+        call_docval_func(super(H5SpecReader, self).__init__, super_kwargs)
+        self._H5SpecReader__cache = None
 
 
 class NWBZARRHDF5IO(_HDF5IO):
@@ -137,14 +148,13 @@ class NWBZARRHDF5IO(_HDF5IO):
             self.__read[self.__file.name] = f_builder
         return f_builder
 
-    @classmethod
     @docval({'name': 'namespace_catalog', 'type': (NamespaceCatalog, TypeMap),
              'doc': 'the NamespaceCatalog or TypeMap to load namespaces into'},
             {'name': 'path', 'type': str, 'doc': 'the path to the zarr Group', 'default': None},
             {'name': 'namespaces', 'type': list, 'doc': 'the namespaces to load', 'default': None},
             {'name': 'file', 'type': zarr.Group, 'doc': 'a pre-existing zarr.Group object', 'default': None},
             returns="dict with the loaded namespaces", rtype=dict)
-    def load_namespaces(cls, **kwargs):
+    def load_namespaces(self, **kwargs):
         '''
         Load cached namespaces from a file.
         '''
@@ -161,7 +171,55 @@ class NWBZARRHDF5IO(_HDF5IO):
                        % (path, file_obj.filename))
                 raise ValueError(msg)
 
-        return cls._HDF5IO__load_namespaces(namespace_catalog, namespaces, file_obj)
+        return self.__load_namespaces(namespace_catalog, namespaces, file_obj)
+
+    def __load_namespaces(self, namespace_catalog, namespaces, file_obj):
+        d = {}
+
+        if SPEC_LOC_ATTR not in file_obj.attrs:
+            msg = "No cached namespaces found in %s" % file_obj.filename
+            warn(msg)
+            return d
+
+        spec_group = file_obj[file_obj.attrs[SPEC_LOC_ATTR]]
+
+        if namespaces is None:
+            namespaces = list(spec_group.keys())
+
+        readers = dict()
+        deps = dict()
+        for ns in namespaces:
+            ns_group = spec_group[ns]
+            # NOTE: by default, objects within groups are iterated in alphanumeric order
+            version_names = list(ns_group.keys())
+            if len(version_names) > 1:
+                # prior to HDMF 1.6.1, extensions without a version were written under the group name "unversioned"
+                # make sure that if there is another group representing a newer version, that is read instead
+                if 'unversioned' in version_names:
+                    version_names.remove('unversioned')
+            if len(version_names) > 1:
+                # as of HDMF 1.6.1, extensions without a version are written under the group name "None"
+                # make sure that if there is another group representing a newer version, that is read instead
+                if 'None' in version_names:
+                    version_names.remove('None')
+            latest_version = version_names[-1]
+            ns_group = ns_group[latest_version]
+            ns_group = self.__set_rgroup(ns_group)
+            reader = ZarrSpecReader(ns_group)
+            readers[ns] = reader
+            for spec_ns in reader.read_namespace('namespace'):
+                deps[ns] = list()
+                for s in spec_ns['schema']:
+                    dep = s.get('namespace')
+                    if dep is not None:
+                        deps[ns].append(dep)
+
+        order = self._order_deps(deps)
+        for ns in order:
+            reader = readers[ns]
+            d.update(namespace_catalog.load_namespaces('namespace', reader=reader))
+
+        return d
 
     def __set_rgroup(self, obj):
         obj.file = self.__rgroup
