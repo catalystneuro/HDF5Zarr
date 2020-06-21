@@ -8,11 +8,107 @@ import fsspec
 import hdf5plugin
 from typing import Union
 import os
+import io
 from pathlib import Path
 from collections.abc import MutableMapping
 from pathlib import PurePosixPath
 from zarr.util import json_dumps, json_loads
+from xdrlib import Unpacker
+import struct
 SYMLINK = '.link'
+
+
+class UnpackerVlenString(Unpacker):
+
+    def reset(self, data):
+        self.__buf = data
+        self.__pos = 0
+
+    def unpack_fopaque(self, n, size=8):
+        if n < 0:
+            raise ValueError('fstring size must be nonnegative')
+        i = self.__pos
+        j = i + (n+(size-1))//size*size
+        if j > len(self.__buf):
+            return 0
+        self.__pos = j
+        return self.__buf[i:i+n]
+
+    def unpack_opaque(self):
+        nid = self.unpack_uint64()
+        n = self.unpack_uint64()
+        b = self.unpack_fopaque(n, size=8)
+        if nid == 0 or b == 0:
+            # end of gcol
+            return None
+        return nid, b
+
+    def unpack_uint64(self, n=8):
+        i = self.__pos
+        self.__pos = j = i+n
+        data = self.__buf[i:j]
+        if len(data) < n:
+            # end of gcol
+            return 0
+        return struct.unpack('<Q', data)[0]
+
+    def unpack_vlenstring(self, unpack_item):
+        vlen_list = []
+        id_list = []
+        while 1:
+            item = unpack_item()
+            if item is None:
+                return id_list, vlen_list
+            id_list.append(item[0])
+            vlen_list.append(item[1])
+        return id_list, vlen_list
+
+
+class VLenHDF5String(numcodecs.abc.Codec):
+
+    codec_id = 'VLenHDF5String'
+
+    def __init__(self, size=8):
+        self.size = size
+        # TO DO #
+        self.dt_vlen = np.dtype([('size', 'uint32'), ('address', f'uint{self.size*8}'), ('id', 'uint32')])
+
+    def decode(self, buf, out=None):
+
+        data_array = np.frombuffer(buf[0], dtype=self.dt_vlen)
+        data_offsets = np.unique(data_array['address'])
+        data_offsets.sort()
+        sort_args = np.argsort(data_array[['address', 'id']])
+        address_sorted = data_array['address'][sort_args]
+        ids_sorted = data_array['id'][sort_args]
+        p = np.where(np.diff(address_sorted, prepend=-1, append=np.inf))[0]
+
+        vlen_array = np.empty(shape=len(data_array), dtype=object)
+        for i in range(len(data_offsets)):
+            unpacker = UnpackerVlenString(buf[i+1])
+            id_list, vlen_list = unpacker.unpack_vlenstring(unpacker.unpack_opaque)
+            ids_sorted_i = ids_sorted[p[i]:p[i+1]]
+            sorter = np.argsort(id_list)
+            vlen_str_index = np.searchsorted(id_list, ids_sorted_i, sorter=sorter)
+            vlen_array[p[i]:p[i+1]] = np.array(vlen_list)[sorter[vlen_str_index]].astype(str)
+
+        vlen_array = vlen_array[np.argsort(sort_args)]
+
+        return vlen_array
+
+    def encode(self, buf):
+        raise RuntimeError('VLenHDF5String: Cannot encode')
+
+    def get_config(self):
+        return {'id': self.codec_id, 'size': self.size}
+
+    @classmethod
+    def from_config(cls, config):
+        size = config['size']
+        return cls(size)
+
+
+numcodecs.register_codec(VLenHDF5String)
 
 
 class HDF5Zarr(object):
@@ -202,9 +298,6 @@ class HDF5Zarr(object):
                     deref_obj = self.file[val]
                     if deref_obj.name:
                         val = self.file[val].name
-                        if isinstance(deref_obj, h5py.Dataset) and h5py.check_vlen_dtype(deref_obj.dtype):
-                            print(f"Attribute value of type {type(val)} is not processed: \
-                                    Attribute {key} of object {h5obj.name}")
                     else:
                         print(f"Attribute value of type {type(val)} is not processed: \
                                 Attribute {key} of object {h5obj.name}, anonymous target")
@@ -307,6 +400,72 @@ class HDF5Zarr(object):
 
         return offsets_, sizes_, chunk_indices
 
+    def vlen_storage_info(self, dset, info):
+        if len(info) == 0:
+            # a null dataset, or no chunk has been written
+            # or external dataset
+            return dict()
+
+        dsid = dset.id
+        file_handle = self.file.id.get_vfd_handle()
+        file_io = io.FileIO(file_handle, closefd=False)
+        if dset.file.userblock_size != 0:
+            # TO DO #
+            pass
+        fcid = dset.file.id.get_create_plist()
+        unit_address_offset, unit_length_offset = fcid.get_sizes()
+
+        # TO DO #
+        dt_vlen = np.dtype([('size', 'uint32'), ('address', f'uint{unit_address_offset*8}'), ('id', 'uint32')])
+        signature_version_size = 8
+
+        if dset.chunks is None:
+            key = (0,) * (len(dset.shape) or 1)
+            dsid_string_offset = dsid.get_offset()
+            dsid_string_storage_size = dsid.get_storage_size()
+
+            gcol_offsets = self._get_vlenstorage_info(file_io, dsid_string_offset, dsid_string_storage_size, dt_vlen,
+                                                      unit_length_offset, signature_version_size)
+
+            return {key: {'offset': dsid_string_offset,
+                          'size': dsid_string_storage_size,  # size already allocated
+                          'gcol_offsets': gcol_offsets}}  # data offsets
+        else:
+            # TO DO #
+
+            for key in info:
+                bytes_offset = info[key]['offset']
+                blob_size = info[key]['size']
+
+                # data offsets
+                gcol_offsets = self._get_vlenstorage_info(file_io, bytes_offset, blob_size, dt_vlen,
+                                                          unit_length_offset, signature_version_size)
+
+                info[key].update({'gcol_offsets': gcol_offsets})
+
+            return info
+
+    def _get_vlenstorage_info(self, file_io, dsid_string_offset, dsid_string_storage_size, dt_vlen,
+                              unit_length_offset, signature_version_size):
+
+        file_io.seek(dsid_string_offset)
+        data_ = file_io.read(dsid_string_storage_size)
+
+        data_array = np.frombuffer(data_, dtype=dt_vlen)
+        data_offsets = np.unique(data_array['address'])
+        data_offsets.sort()
+        data_offsets = data_offsets.tolist()
+
+        gcol_offsets = {}
+        for offset in data_offsets:
+            file_io.seek(offset+signature_version_size)
+            size_bytes = file_io.read(unit_length_offset)
+            gcol_size_i = int.from_bytes(size_bytes, byteorder='little')
+            gcol_offsets[offset] = (gcol_size_i,
+                                    signature_version_size + unit_length_offset)
+
+        return gcol_offsets
+
     def create_zarr_hierarchy(self, h5py_group, zgroup):
         """  Scan hdf5 file and recursively create zarr attributes, groups and dataset structures for accessing data
         Args:
@@ -369,6 +528,8 @@ class HDF5Zarr(object):
                 else:
                     compression = None
 
+                object_codec = None
+
                 if dset.dtype.names is not None:
                     # Structured array with Reference dtype
 
@@ -400,12 +561,18 @@ class HDF5Zarr(object):
                 # variable-length Datasets
                 elif h5py.check_vlen_dtype(dset.dtype):
                     if not h5py.check_string_dtype(dset.dtype):
-                        # TO DO #
                         print(f"Dataset {dset.name} is not processed: Variable-length dataset, not string")
                         continue
                     else:
-                        print(f"Dataset {dset.name} is not processed: variable-length string dataset")
-                        continue
+                        object_codec = VLenHDF5String()
+                        zarray = zgroup.create_dataset(dset.name, shape=dset.shape,
+                                                       dtype=object,
+                                                       chunks=dset.chunks or False,
+                                                       fill_value=dset.fillvalue,
+                                                       compression=compression,
+                                                       overwrite=True,
+                                                       object_codec=object_codec)
+                        dset_chunks = dset.chunks
 
                 elif dset.dtype.hasobject:
                     # TO DO test #
@@ -465,7 +632,10 @@ class HDF5Zarr(object):
                 self.copy_attrs_data_to_zarr_store(dset, zarray)
                 info = self.storage_info(dset, dset_chunks)
 
-                # Store chunk location metadata...
+                if object_codec is not None:
+                    info = self.vlen_storage_info(dset, info)
+
+                # Store metadata
                 if info:
                     info['source'] = {'uri': self.uri,
                                       'array_name': dset.name}
@@ -601,6 +771,9 @@ class FileChunkStore(MutableMapping):
             raise TypeError(f'{chunk_source}: chunk source is not '
                             'seekable and readable')
         self._source = chunk_source
+        self._gcol = {}
+        # TO DO #
+        self.dt_vlen = np.dtype([('size', 'uint32'), ('address', 'uint64'), ('id', 'uint32')])
 
     @property
     def store(self):
@@ -674,8 +847,35 @@ class FileChunkStore(MutableMapping):
             raise KeyError(chunk_key)
 
         # Read chunk's data...
+
         self._source.seek(chunk_loc['offset'], os.SEEK_SET)
         bytes = self._source.read(chunk_loc['size'])
+
+        # variable-length string
+        if 'gcol_offsets' in chunk_loc:
+
+            data_array = np.frombuffer(bytes, dtype=self.dt_vlen)
+            data_offsets = np.unique(data_array['address'])
+            data_offsets.sort()
+            data_offsets = data_offsets.tolist()
+
+            data_bytes = np.empty(shape=len(data_offsets)+1, dtype=object)
+            data_bytes[0] = bytes
+
+            for i in range(len(data_offsets)):
+                offset_item = data_offsets[i]
+                if offset_item not in self._gcol:
+                    gcol_size, skip = chunk_loc['gcol_offsets'][str(offset_item)]
+                    gcol_size = gcol_size - skip
+                    offset = offset_item + skip
+                    self._source.seek(offset, os.SEEK_SET)
+                    gcol_bytes = self._source.read(gcol_size)
+                    self._gcol[offset] = gcol_bytes
+                    data_bytes[i+1] = gcol_bytes
+                else:
+                    data_bytes[i+1] = self._gcol[offset]
+
+            return data_bytes
 
         try:
             # Get array chunk size

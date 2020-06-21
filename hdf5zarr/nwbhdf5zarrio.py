@@ -73,7 +73,7 @@ class NWBZARRHDF5IO(_HDF5IO):
                 raise ValueError("cannot load namespaces from file when writing to it")
 
             tm = get_type_map()
-            super(NWBZARRHDF5IO, self).load_namespaces(tm, path, file=file_obj)
+            self.load_namespaces(tm, path, file=file_obj)
             manager = BuildManager(tm)
 
             # XXX: Leaving this here in case we want to revert to this strategy for
@@ -136,6 +136,32 @@ class NWBZARRHDF5IO(_HDF5IO):
             f_builder = self.__read_group(self.__file, ROOT_NAME, ignore=ignore)
             self.__read[self.__file.name] = f_builder
         return f_builder
+
+    @classmethod
+    @docval({'name': 'namespace_catalog', 'type': (NamespaceCatalog, TypeMap),
+             'doc': 'the NamespaceCatalog or TypeMap to load namespaces into'},
+            {'name': 'path', 'type': str, 'doc': 'the path to the zarr Group', 'default': None},
+            {'name': 'namespaces', 'type': list, 'doc': 'the namespaces to load', 'default': None},
+            {'name': 'file', 'type': zarr.Group, 'doc': 'a pre-existing zarr.Group object', 'default': None},
+            returns="dict with the loaded namespaces", rtype=dict)
+    def load_namespaces(cls, **kwargs):
+        '''
+        Load cached namespaces from a file.
+        '''
+
+        namespace_catalog, path, namespaces, file_obj = popargs('namespace_catalog', 'path', 'namespaces', 'file',
+                                                                kwargs)
+
+        if file_obj is None:
+            raise ValueError("'file' argument must be supplied to load_namespaces.")
+
+        if path is not None and file_obj is not None:  # consistency check
+            if os.path.abspath(file_obj.filename) != os.path.abspath(path):
+                msg = ("You argued '%s' as this object's path, but supplied a file with filename: %s"
+                       % (path, file_obj.filename))
+                raise ValueError(msg)
+
+        return cls._HDF5IO__load_namespaces(namespace_catalog, namespaces, file_obj)
 
     def __set_rgroup(self, obj):
         obj.file = self.__rgroup
@@ -259,10 +285,16 @@ class NWBZARRHDF5IO(_HDF5IO):
             if isinstance(scalar, bytes):
                 scalar = scalar.decode('UTF-8')
 
-            # TO DO #
-            if h5obj.dtype.kind == 'O':
+            # TO DO Reference #
+            deref_obj = None
+            if isinstance(scalar, str) and scalar != '':
+                try:
+                    deref_obj = h5obj.file[scalar]
+                except:
+                    pass
+            if deref_obj is not None:
                 # TODO (AJTRITT):  This should call __read_ref to support Group references
-                target = h5obj.file[scalar]
+                target = deref_obj
                 target = self.__set_rgroup(target)
                 target_builder = self.__read_dataset(target)
                 self.__set_built(target.file.filename, target.id, target_builder)
