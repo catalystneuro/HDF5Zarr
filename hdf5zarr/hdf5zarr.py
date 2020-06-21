@@ -2,10 +2,8 @@ import h5py
 import zarr
 from zarr.storage import array_meta_key
 import numpy as np
-from urllib.parse import urlparse, urlunparse
 import numcodecs
 import fsspec
-import hdf5plugin
 from typing import Union
 import os
 from pathlib import Path

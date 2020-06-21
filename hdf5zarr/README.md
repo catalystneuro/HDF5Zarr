@@ -2,18 +2,21 @@
 
 ## Installation
 
+Requires latest dev installation of h5py
+
+
 ```bash
 $ pip install git+https://github.com/catalystneuro/allen-institute-neuropixel-utils
 ```
+
 
 ## Usage:
 
 ```python
 
-from hdf5zarr import HDF5Zarr
-from hdf5zarr import rewrite_vlen_to_fixed
 import zarr
-import fsspec
+from hdf5zarr import HDF5Zarr, NWBZARRHDF5IO
+from hdf5zarr import rewrite_vlen_to_fixed
 
 file_name = 'ecephys.nwb'
 
@@ -21,12 +24,16 @@ file_name = 'ecephys.nwb'
 rewrite_vlen_to_fixed(file_name)
 
 # Local read
-hdf5_zarr = HDF5Zarr(file_name)
+store = zarr.DirectoryStore('storezarr')
+hdf5_zarr = HDF5Zarr(filename = file_name, store=store, store_mode='w', max_chunksize=2*2**20)
 # Without indicating a specific zarr store, zarr uses the default zarr.MemoryStore
 # alternatively pass a zarr store such as:
 # store = zarr.DirectoryStore('storezarr')
 # hdf5_zarr = HDF5Zarr(file_name, store = store, store_mode = 'w')
 zgroup = hdf5_zarr.consolidate_metadata(metadata_key = '.zmetadata')
+io = NWBZARRHDF5IO(mode='r+', file=zgroup, load_namespaces=True)             
+
+
 # print dataset names
 zgroup.tree()
 # read
