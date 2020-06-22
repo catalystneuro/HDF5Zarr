@@ -368,11 +368,10 @@ class NWBZARRHDF5IO(_HDF5IO):
                 elem1 = h5obj[0]
                 if isinstance(elem1, (str, bytes)):
                     d = h5obj
-                # TO DO #
-                elif isinstance(elem1, 'uint64'):        # read list of references
-                    d = BuilderH5ReferenceDataset(h5obj, self)
+            # TO DO #
+            elif h5obj.dtype == 'uint64' and len(h5obj) > 0:
+                d = BuilderH5ReferenceDataset(HDMFArray(h5obj), self)  # read list of references
                 # TO DO Region Reference #
-
             elif h5obj.dtype.kind == 'V':    # table
                 cpd_dt = h5obj.dtype
                 # TO DO check_dtype #
