@@ -1,6 +1,7 @@
 import h5py
 import zarr
 from zarr.storage import array_meta_key
+from zarr.storage import ConsolidatedMetadataStore
 import numpy as np
 import numcodecs
 import fsspec
@@ -219,11 +220,30 @@ class HDF5Zarr(object):
         '''
         Wrapper over zarr.consolidate_metadata to pass chunk store when opening the zarr store
         '''
-        zarr.consolidate_metadata(self.store, metadata_key=metadata_key)
+
+        # same as zarr.consolidate_metadata(self.store, metadata_key) call,
+        # only with key.endswith('.zchunkstore') in is_zarr_key, and passing chunk store
+        def is_zarr_key(key):
+            return (key.endswith('.zchunkstore') or
+                    key.endswith('.zarray') or
+                    key.endswith('.zgroup') or
+                    key.endswith('.zattrs'))
+
+        out = {
+            'zarr_consolidated_format': 1,
+            'metadata': {
+                key: json_loads(self.store[key])
+                for key in self.store if is_zarr_key(key)
+            }
+        }
+        self.store[metadata_key] = json_dumps(out)
+
+        meta_store = ConsolidatedMetadataStore(self.store, metadata_key=metadata_key)
+
         store_mode_cons = 'r' if self.store_mode == 'r' else 'r+'
-        self.zgroup = zarr.open_consolidated(self.store, metadata_key=metadata_key,
-                                             mode=store_mode_cons, chunk_store=self.zgroup.chunk_store,
-                                             path=self.store_path)
+        self.zgroup = zarr.open(store=meta_store, mode=store_mode_cons,
+                                chunk_store=self.zgroup.chunk_store, path=self.store_path)
+
         return self.zgroup
 
     def _fill_regfilters(self):
