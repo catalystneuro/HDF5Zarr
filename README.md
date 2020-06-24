@@ -19,7 +19,7 @@ Donwload example dataset from from https://girder.dandiarchive.org/api/v1/item/5
 import zarr
 from hdf5zarr import HDF5Zarr
 
-file_name = '/Users/bendichter/dev/allen-institute-neuropixel-utils/sub-699733573_ses-715093703.nwb'
+file_name = 'sub-699733573_ses-715093703.nwb'
 store = zarr.DirectoryStore('storezarr')
 hdf5_zarr = HDF5Zarr(filename = file_name, store=store, store_mode='w', max_chunksize=2*2**20)
 zgroup = hdf5_zarr.consolidate_metadata(metadata_key = '.zmetadata')
@@ -67,7 +67,7 @@ import zarr
 import s3fs
 from hdf5zarr import HDF5Zarr, NWBZARRHDF5IO
 
-file_name = '/Users/bendichter/dev/allen-institute-neuropixel-utils/sub-699733573_ses-715093703.nwb'
+file_name = 'sub-699733573_ses-715093703.nwb'
 store = zarr.DirectoryStore('storezarr')
 hdf5_zarr = HDF5Zarr(filename = file_name, store=store, store_mode='w', max_chunksize=2*2**20)
 zgroup = hdf5_zarr.consolidate_metadata(metadata_key = '.zmetadata')
