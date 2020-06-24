@@ -13,6 +13,8 @@ $ pip install git+https://github.com/catalystneuro/allen-institute-neuropixel-ut
 ## Usage:
 
 ## Reading local data
+HDF5Zarr can be used to read a local HDF5 file where the datasets are actually read using the Zarr library.
+
 ```python
 import zarr
 from hdf5zarr import HDF5Zarr
@@ -38,7 +40,7 @@ arr = zgroup['units/spike_times']
 val = arr[0:1000]
 ```
 
-Read data into PyNWB:
+Once you have a zgroup object, this object can be read by PyNWB using the 
 ```python
 from hdf5zarr import NWBZARRHDF5IO
 io = NWBZARRHDF5IO(mode='r+', file=zgroup)     
@@ -59,7 +61,7 @@ zgroup = hdf5_zarr.zgroup
 io = NWBZARRHDF5IO(mode='r', file=zgroup, load_namespaces=True)
 ```
 
-
+Here is the entire workflow for opening a file remotely:
 ```python
 import zarr
 import s3fs
