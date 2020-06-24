@@ -14,7 +14,7 @@ $ pip install git+https://github.com/catalystneuro/HDF5Zarr.git
 
 ## Reading local data
 HDF5Zarr can be used to read a local HDF5 file where the datasets are actually read using the Zarr library.
-
+Donwload example dataset from from https://girder.dandiarchive.org/api/v1/item/5eda859399f25d97bd27985d/download
 ```python
 import zarr
 from hdf5zarr import HDF5Zarr
