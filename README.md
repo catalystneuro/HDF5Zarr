@@ -6,7 +6,7 @@ Requires latest dev installation of h5py
 
 
 ```bash
-$ pip install git+https://github.com/catalystneuro/allen-institute-neuropixel-utils
+$ pip install git+https://github.com/catalystneuro/HDF5Zarr.git
 ```
 
 
