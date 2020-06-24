@@ -391,7 +391,7 @@ class NWBZARRHDF5IO(_HDF5IO):
         for k, v in h5obj.attrs.items():
             if k == SPEC_LOC_ATTR:     # ignore cached spec
                 continue
-            if isinstance(v, str) and v != '':
+            if isinstance(v, str) and v.startswith('//'):
                 try:
                     deref_obj = h5obj.file[v]
                 except:

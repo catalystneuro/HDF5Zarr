@@ -14,7 +14,7 @@ from pathlib import PurePosixPath
 from zarr.util import json_dumps, json_loads
 from xdrlib import Unpacker
 import struct
-SYMLINK = '.link'
+SYMLINK = 'llink'
 
 
 class UnpackerVlenString(Unpacker):
@@ -152,13 +152,13 @@ class HDF5Zarr(object):
 
         # Verify arguments
         if not isinstance(LRU, bool):
-            raise TypeError(f"Expected bool for LRU, received {type(LRU)}")
+            raise TypeError(f"Expected bool for LRU, recieved {type(LRU)}")
         self.LRU = LRU
         if not isinstance(LRU_max_size, int):
-            raise TypeError(f"Expected int for LRU_max_size, received {type(LRU_max_size)}")
+            raise TypeError(f"Expected int for LRU_max_size, recieved {type(LRU_max_size)}")
         self.LRU_max_size = LRU_max_size
         if not isinstance(max_chunksize, int):
-            raise TypeError(f"Expected int for max_chunksize, received {type(max_chunksize)}")
+            raise TypeError(f"Expected int for max_chunksize, recieved {type(max_chunksize)}")
         self.max_chunksize = max_chunksize
 
         # store, store_path, and store_mode are passed through to zarr
@@ -315,7 +315,7 @@ class HDF5Zarr(object):
                     # not a null reference
                     deref_obj = self.file[val]
                     if deref_obj.name:
-                        val = self.file[val].name
+                        val = '//'+self.file[val].name
                     else:
                         print(f"Attribute value of type {type(val)} is not processed: \
                                 Attribute {key} of object {h5obj.name}, anonymous target")
