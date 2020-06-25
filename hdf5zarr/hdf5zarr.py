@@ -14,7 +14,7 @@ from pathlib import PurePosixPath
 from zarr.util import json_dumps, json_loads
 from xdrlib import Unpacker
 import struct
-SYMLINK = 'llink'
+SYMLINK = '.link'
 
 
 class UnpackerVlenString(Unpacker):

@@ -1,5 +1,0 @@
-h5py @ git+https://github.com/h5py/h5py.git
-zarr
-numcodecs
-fsspec
-hdmf @ git+https://github.com/hdmf-dev/hdmf.git@hdf5io_handle_file_obj

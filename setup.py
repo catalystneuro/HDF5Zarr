@@ -1,7 +1,15 @@
 from setuptools import setup, find_packages
 
-with open('requirements.txt', "r") as f:
-    install_requires = f.read().split()
+install_requires = ['numpy',
+                    'cython',
+                    'pkgconfig',
+                    'zarr',
+                    'numcodecs',
+                    'h5py @ git+https://github.com/h5py/h5py.git',
+                    'fsspec',
+                    's3fs',
+                    'hdmf @ git+https://github.com/hdmf-dev/hdmf.git@hdf5io_handle_file_obj',
+                    'nwbwidgets']
 
 with open("README.md", "r") as fh:
     long_description = fh.read()
