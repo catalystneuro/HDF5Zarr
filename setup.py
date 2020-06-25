@@ -15,10 +15,10 @@ with open("README.md", "r") as fh:
     long_description = fh.read()
 
 setup(
-    name="allen-institute-neuropixel-utils",
+    name="HDF5Zarr",
     version=0.1,
-    url="https://github.com/catalystneuro/allen-institute-neuropixel-utils",
-    description="allen-institute-neuropixel-utils",
+    url="https://github.com/catalystneuro/HDF5Zarr",
+    description="Reading HDF5 files with Zarr",
     long_description=long_description,
     long_description_content_type="text/markdown",
     author="Daniel Sotoude, Ben Dichter",
