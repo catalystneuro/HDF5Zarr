@@ -14,8 +14,23 @@ $ pip install git+https://github.com/catalystneuro/HDF5Zarr.git
 
 ## Reading local data
 HDF5Zarr can be used to read a local HDF5 file where the datasets are actually read using the Zarr library.
-Download example dataset from https://girder.dandiarchive.org/api/v1/item/5eda859399f25d97bd27985d/download
+Download example dataset from https://girder.dandiarchive.org/api/v1/item/5eda859399f25d97bd27985d/download:
+
 ```python
+
+import requests
+import os.path as op
+file_name = 'sub-699733573_ses-715093703.nwb'
+
+if not op.exists(file_name):
+    response = requests.get("https://girder.dandiarchive.org/api/v1/item/5eda859399f25d97bd27985d/download")
+    with open(file_name, mode='wb') as localfile:
+        localfile.write(response.content)
+
+```
+
+```python
+
 import zarr
 from hdf5zarr import HDF5Zarr
 
@@ -54,7 +69,7 @@ with open(metadata_file, 'w') as f:
     json.dump(zgroup.store.meta_store, f)
 ```
 
-        
+
 Open NWB file on remote S3 store. requires a local metadata_file, constructed in previous steps.
 ```python
 import s3fs
