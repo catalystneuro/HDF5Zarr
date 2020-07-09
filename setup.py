@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 install_requires = ['numpy',
                     'cython',
                     'pkgconfig',
-                    'zarr',
+                    'zarr>=2.4.0',
                     'numcodecs',
                     'h5py @ git+https://github.com/h5py/h5py.git',
                     'fsspec',
