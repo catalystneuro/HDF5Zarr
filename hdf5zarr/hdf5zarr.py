@@ -14,6 +14,7 @@ from pathlib import PurePosixPath
 from zarr.util import json_dumps, json_loads
 from xdrlib import Unpacker
 import struct
+from packaging import version
 SYMLINK = '.link'
 
 
@@ -487,6 +488,11 @@ class HDF5Zarr(object):
             (not issubclass(self.file.get(h5py_group.name, getclass=True), h5py.Group) or
              not issubclass(self.file.get(h5py_group.name, getclass=True, getlink=True), h5py.HardLink))):
             raise TypeError(f"{h5py_group} should be a h5py.File or h5py.Group as a h5py.HardLink")
+
+        if version.parse(h5py.version.hdf5_version) < version.parse('1.10.5'):
+            raise Exception(("HDF5Zarr requires h5py installed with minimum hdf5 version of 1.10.5,\n"
+                             f"Current hdf5 version {h5py.version.hdf5_version},\n"
+                             "h5py installation: https://h5py.readthedocs.io/en/stable/build.html#custom-installation"))
 
         self.copy_attrs_data_to_zarr_store(h5py_group, zgroup)
 
