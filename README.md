@@ -35,8 +35,7 @@ import zarr
 from hdf5zarr import HDF5Zarr
 
 file_name = 'sub-699733573_ses-715093703.nwb'
-store = zarr.DirectoryStore('storezarr')
-hdf5_zarr = HDF5Zarr(filename = file_name, store=store, store_mode='w', max_chunksize=2*2**20)
+hdf5_zarr = HDF5Zarr(filename = file_name, store_mode='w', max_chunksize=2*2**20)
 zgroup = hdf5_zarr.consolidate_metadata(metadata_key = '.zmetadata')
 ```
 Without indicating a specific zarr store, zarr uses the default `zarr.MemoryStore`.
@@ -65,8 +64,8 @@ Export metadata from zarr store to a single json file
 ```python
 import json
 metadata_file = 'metadata'
-with open(metadata_file, 'w') as f:
-    json.dump(zgroup.store.meta_store, f)
+with open(metadata_file, 'w') as mfile:
+    json.dump(zgroup.store.meta_store, mfile)
 ```
 
 
@@ -76,13 +75,13 @@ import s3fs
 from hdf5zarr import NWBZARRHDF5IO
 
 
+# import metadata from a json file
+with open(metadata_file, 'r') as mfile:
+    store = json.load(mfile)
+
 fs = s3fs.S3FileSystem(anon=True)
 
 f = fs.open('dandiarchive/girder-assetstore/4f/5a/4f5a24f7608041e495c85329dba318b7', 'rb')
-
-# import metadata from a json file
-with open(metadata_file, 'r') as f:
-    store = json.load(f)
 
 hdf5_zarr = HDF5Zarr(f, store = store, store_mode = 'r')
 zgroup = hdf5_zarr.zgroup
