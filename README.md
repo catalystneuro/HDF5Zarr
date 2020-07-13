@@ -1,9 +1,42 @@
 <strong>Reading HDF5 files with Zarr</strong> building upon [Cloud-Performant NetCDF4/HDF5 Reading with the Zarr Library](https://medium.com/pangeo/cloud-performant-reading-of-netcdf4-hdf5-data-using-the-zarr-library-1a95c5c92314)
 
-## Installation
+## Installation:
 
-Requires latest dev installation of h5py
+Requires latest dev installation of h5py, with HDF5>=1.10.5.
 
+### Install HDF5
+Check available HDF5 version:
+```bash
+$ h5cc -showconfig
+```
+
+##### Conda:
+``` bash
+$ conda install "hdf5>=1.10.5"
+```
+
+##### Source installation:
+Download and install [HDF5](https://www.hdfgroup.org/downloads/hdf5/)  
+e.g.
+```bash
+$ cd hdf5*/bin
+$ ./h5redeploy
+```
+
+### Install h5py
+Follow h5py instructions for [custom installation](https://h5py.readthedocs.io/en/stable/build.html#custom-installation)  
+For example:
+##### Conda:
+``` bash
+$ HDF5_DIR=$CONDA_PREFIX pip install --no-binary=h5py git+https://github.com/h5py/h5py.git
+```
+
+##### Source installation:
+```bash
+$ HDF5_DIR=/path/to/hdf5 pip install --no-binary=h5py git+https://github.com/h5py/h5py.git
+```
+
+### Install HDF5Zarr
 
 ```bash
 $ pip install git+https://github.com/catalystneuro/HDF5Zarr.git
