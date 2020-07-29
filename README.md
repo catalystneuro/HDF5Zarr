@@ -102,7 +102,8 @@ with open(metadata_file, 'w') as mfile:
 ```
 
 
-Open NWB file on remote S3 store. requires a local metadata_file, constructed in previous steps.
+## Open NWB file on remote S3 store.
+Requires a local metadata_file, constructed in previous steps.
 ```python
 import s3fs
 from hdf5zarr import NWBZARRHDF5IO
