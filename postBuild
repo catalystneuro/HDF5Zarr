@@ -1,2 +1,2 @@
-HDF5_DIR=$CONDA_PREFIX pip install --no-binary=h5py git+https://github.com/h5py/h5py.git
+pip install git+https://github.com/h5py/h5py.git
 pip install git+https://github.com/catalystneuro/HDF5Zarr.git
