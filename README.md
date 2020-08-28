@@ -1,9 +1,42 @@
-<strong>Reading HDF5 files with Zarr</strong> building upon [Cloud-Performant NetCDF4/HDF5 Reading with the Zarr Library](https://medium.com/pangeo/cloud-performant-reading-of-netcdf4-hdf5-data-using-the-zarr-library-1a95c5c92314)
+<strong>Reading HDF5 files with Zarr</strong> building upon [Cloud-Performant NetCDF4/HDF5 Reading with the Zarr Library](https://medium.com/pangeo/cloud-performant-reading-of-netcdf4-hdf5-data-using-the-zarr-library-1a95c5c92314). This allows for efficiently reading HDF5 files stored remotely, and integration with Zarr-based computation tools.
 
-## Installation
+## Installation:
 
-Requires latest dev installation of h5py
+Requires latest dev installation of h5py, with HDF5>=1.10.5.
 
+### Install HDF5
+Check available HDF5 version:
+```bash
+$ h5cc -showconfig
+```
+
+##### Conda:
+``` bash
+$ conda install "hdf5>=1.10.5"
+```
+
+##### Source installation:
+Download and install [HDF5](https://www.hdfgroup.org/downloads/hdf5/)  
+e.g.
+```bash
+$ cd hdf5*/bin
+$ ./h5redeploy
+```
+
+### Install h5py
+Follow h5py instructions for [custom installation](https://h5py.readthedocs.io/en/stable/build.html#custom-installation)  
+For example:
+##### Conda:
+``` bash
+$ HDF5_DIR=$CONDA_PREFIX pip install --no-binary=h5py git+https://github.com/h5py/h5py.git
+```
+
+##### Source installation:
+```bash
+$ HDF5_DIR=/path/to/hdf5 pip install --no-binary=h5py git+https://github.com/h5py/h5py.git
+```
+
+### Install HDF5Zarr
 
 ```bash
 $ pip install git+https://github.com/catalystneuro/HDF5Zarr.git
@@ -35,8 +68,7 @@ import zarr
 from hdf5zarr import HDF5Zarr
 
 file_name = 'sub-699733573_ses-715093703.nwb'
-store = zarr.DirectoryStore('storezarr')
-hdf5_zarr = HDF5Zarr(filename = file_name, store=store, store_mode='w', max_chunksize=2*2**20)
+hdf5_zarr = HDF5Zarr(filename = file_name, store_mode='w', max_chunksize=2*2**20)
 zgroup = hdf5_zarr.consolidate_metadata(metadata_key = '.zmetadata')
 ```
 Without indicating a specific zarr store, zarr uses the default `zarr.MemoryStore`.
@@ -65,24 +97,25 @@ Export metadata from zarr store to a single json file
 ```python
 import json
 metadata_file = 'metadata'
-with open(metadata_file, 'w') as f:
-    json.dump(zgroup.store.meta_store, f)
+with open(metadata_file, 'w') as mfile:
+    json.dump(zgroup.store.meta_store, mfile)
 ```
 
 
-Open NWB file on remote S3 store. requires a local metadata_file, constructed in previous steps.
+## Open NWB file on remote S3 store.
+Requires a local metadata_file, constructed in previous steps.
 ```python
 import s3fs
 from hdf5zarr import NWBZARRHDF5IO
 
 
+# import metadata from a json file
+with open(metadata_file, 'r') as mfile:
+    store = json.load(mfile)
+
 fs = s3fs.S3FileSystem(anon=True)
 
 f = fs.open('dandiarchive/girder-assetstore/4f/5a/4f5a24f7608041e495c85329dba318b7', 'rb')
-
-# import metadata from a json file
-with open(metadata_file, 'r') as f:
-    store = json.load(f)
 
 hdf5_zarr = HDF5Zarr(f, store = store, store_mode = 'r')
 zgroup = hdf5_zarr.zgroup

@@ -14,6 +14,7 @@ from pathlib import PurePosixPath
 from zarr.util import json_dumps, json_loads
 from xdrlib import Unpacker
 import struct
+from packaging import version
 SYMLINK = '.link'
 
 
@@ -113,7 +114,7 @@ numcodecs.register_codec(VLenHDF5String)
 class HDF5Zarr(object):
     """ class to create zarr structure for reading hdf5 files """
 
-    def __init__(self, filename: str, hdf5group: str = None, hdf5file_mode: str = 'r',
+    def __init__(self, filename: str, hdf5group: str = None,
                  store: Union[MutableMapping, str, Path] = None, store_path: str = None,
                  store_mode: str = 'a', LRU: bool = False, LRU_max_size: int = 2**30,
                  max_chunksize=2*2**20):
@@ -123,9 +124,6 @@ class HDF5Zarr(object):
             filename:                    str or File-like object, file name string or File-like object to be read by zarr
             hdf5group:                   str, hdf5 group in hdf5 file to be read by zarr
                                          along with its children. default is the root group.
-            hdf5file_mode                str, subset of h5py file access modes, filename must exist
-                                         'r'          readonly, default 'r'
-                                         'r+'         read and write
             store:                       collections.abc.MutableMapping or str, zarr store.
                                          if string path is passed, zarr.DirectoryStore
                                          is created at the given path, if None, zarr.MemoryStore is used
@@ -145,11 +143,6 @@ class HDF5Zarr(object):
             max_chunksize:               maximum chunk size to use when creating zarr hierarchy, this is useful if
                                          only a small slice of data needs to be read
         """
-        # Verify arguments
-        if hdf5file_mode not in ('r', 'r+'):
-            raise ValueError("hdf5file_mode must be 'r' or 'r+'")
-        self.hdf5file_mode = hdf5file_mode
-
         # Verify arguments
         if not isinstance(LRU, bool):
             raise TypeError(f"Expected bool for LRU, recieved {type(LRU)}")
@@ -200,7 +193,7 @@ class HDF5Zarr(object):
         self.hdf5group = hdf5group
         self.filename = filename
         if self.store_mode != 'r':
-            self.file = h5py.File(self.filename, mode=self.hdf5file_mode)
+            self.file = h5py.File(self.filename, mode='r')
             self.group = self.file[self.hdf5group] if self.hdf5group is not None else self.file
             self.create_zarr_hierarchy(self.group, self.zgroup)
             self.file.close()
@@ -495,6 +488,11 @@ class HDF5Zarr(object):
             (not issubclass(self.file.get(h5py_group.name, getclass=True), h5py.Group) or
              not issubclass(self.file.get(h5py_group.name, getclass=True, getlink=True), h5py.HardLink))):
             raise TypeError(f"{h5py_group} should be a h5py.File or h5py.Group as a h5py.HardLink")
+
+        if version.parse(h5py.version.hdf5_version) < version.parse('1.10.5'):
+            raise Exception(("HDF5Zarr requires h5py installed with minimum hdf5 version of 1.10.5,\n"
+                             f"Current hdf5 version {h5py.version.hdf5_version},\n"
+                             "h5py installation: https://h5py.readthedocs.io/en/stable/build.html#custom-installation"))
 
         self.copy_attrs_data_to_zarr_store(h5py_group, zgroup)
 
