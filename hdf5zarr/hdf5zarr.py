@@ -149,8 +149,9 @@ class HDF5Zarr(object):
         if not isinstance(LRU_max_size, int):
             raise TypeError(f"Expected int for LRU_max_size, recieved {type(LRU_max_size)}")
         self.LRU_max_size = LRU_max_size
-        if not isinstance(max_chunksize, int):
-            raise TypeError(f"Expected int for max_chunksize, recieved {type(max_chunksize)}")
+        if max_chunksize is not None and not (isinstance(max_chunksize, int) and max_chunksize > 0):
+            raise TypeError(f"Expected positive int or None for max_chunksize,\
+                              recieved {max_chunksize}, type: {type(max_chunksize)}")
         self.max_chunksize = max_chunksize
 
         # store, store_path, and store_mode are passed through to zarr
@@ -398,13 +399,13 @@ class HDF5Zarr(object):
                 _get_chunk_info_by_coord = dsid.get_chunk_info_by_coord
                 if dset_chunks == chunk_size:
                     for key in chunk_indices:
-                        blob = _get_chunk_info_by_coord(key)
+                        blob = _get_chunk_info_by_coord(tuple(np.array(key)*chunk_size))
 
                         stinfo[key] = {'offset': blob.byte_offset,
                                        'size': blob.size}
                 else:
                     for key in chunk_indices:
-                        blob = _get_chunk_info_by_coord(key)
+                        blob = _get_chunk_info_by_coord(tuple(np.array(key)*dset_chunks))
 
                         bytes_offset = blob.byte_offset
                         blob_size = blob.size
@@ -718,10 +719,11 @@ class HDF5Zarr(object):
                 return None
 
         else:
-            if compression is None and (dset.chunks is None or dset.chunks == dset.shape):
+            if (self.max_chunksize is not None and compression is None and
+                    np.prod(dset.shape) != 0 and (dset.chunks is None or dset.chunks == dset.shape)):
 
                 dset_chunks = dset.chunks if dset.chunks else dset.shape
-                if dset.shape != ():
+                if dset.shape != () and dset.size != 0:
                     dset_chunks = list(dset_chunks)
                     dim_ = 0
                     ratio_ = self.max_chunksize/(np.prod(dset_chunks)*dset.dtype.itemsize)
@@ -737,6 +739,8 @@ class HDF5Zarr(object):
                 dset_chunks = dset_chunks or None
             else:
                 dset_chunks = dset.chunks
+                if dset_chunks is None and np.prod(dset.shape) == 0:
+                    dset_chunks = tuple(s if s != 0 else 1 for s in dset.shape)
 
             zarray = zgroup.create_dataset(dset.name, shape=dset.shape,
                                            dtype=dset.dtype,
