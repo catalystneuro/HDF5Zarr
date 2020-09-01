@@ -1,4 +1,4 @@
-<strong>Reading HDF5 files with Zarr</strong> building upon [Cloud-Performant NetCDF4/HDF5 Reading with the Zarr Library](https://medium.com/pangeo/cloud-performant-reading-of-netcdf4-hdf5-data-using-the-zarr-library-1a95c5c92314)
+<strong>Reading HDF5 files with Zarr</strong> building upon [Cloud-Performant NetCDF4/HDF5 Reading with the Zarr Library](https://medium.com/pangeo/cloud-performant-reading-of-netcdf4-hdf5-data-using-the-zarr-library-1a95c5c92314). This allows for efficiently reading HDF5 files stored remotely, and integration with Zarr-based computation tools.
 
 ## Installation:
 
@@ -102,7 +102,8 @@ with open(metadata_file, 'w') as mfile:
 ```
 
 
-Open NWB file on remote S3 store. requires a local metadata_file, constructed in previous steps.
+## Open NWB file on remote S3 store.
+Requires a local metadata_file, constructed in previous steps.
 ```python
 import s3fs
 from hdf5zarr import NWBZARRHDF5IO

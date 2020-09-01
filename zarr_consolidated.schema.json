@@ -1,0 +1,142 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "consolidated_metadata.schema.json",
+  "title": "Zarr consolidated",
+  "description": "A schema for validating consolidated Zarr metadata",
+  "version": "0.1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "patternProperties": {
+    "^.*.zattrs$": {"$ref": "#/definitions/.zattrs"},
+    "^.*.zgroup$": {"$ref":  "#/definitions/.zgroup"},
+    "^.*.zchunkstore$": {"$ref": "#/definitions/.zchunkstore"},
+    "^.*.zarray$": {"$ref": "#/definitions/.zarray"}
+  },
+  "definitions": {
+    ".zattrs": {
+      "type": "object",
+      "properties": {
+        "*": {
+          "anyOf": [
+            {"type": "string"},
+            {"type": "number"},
+            {"type": "array"},
+            {"type": "boolean"}
+          ]
+        }
+      }
+    },
+    ".zgroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "zarr_format"
+      ],
+      "properties": {
+        "zarr_format": {"type": "number"}
+      }
+    },
+    ".zarray": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "chunks",
+        "compressor",
+        "dtype",
+        "fill_value",
+        "filters",
+        "order",
+        "shape",
+        "zarr_format"
+      ],
+      "properties": {
+        "chunks": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          }
+        },
+        "compressor": {},
+        "dtype": {
+          "oneOf": [
+            {"type": "string"},
+            {"title": "complex datatype",
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 2,
+                "minItems": 2
+              }
+            }
+          ]
+        },
+        "fill_value": {
+          "oneOf": [
+            {"type": "number"},
+            {"type": "null"},
+            {"type": "boolean"},
+            {"type": "string"}
+          ]
+        },
+        "filters": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "id",
+                  "size"
+                ],
+                "properties": {
+                  "id": {"type": "string"},
+                  "size": {"type": "integer"}
+                }
+              }
+            }
+          ]
+        },
+        "order": {"enum": ["C", "F"]},
+        "shape": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "zarr_format": {"type": "number"}
+      }
+    },
+    ".zchunkstore": {
+      "type": "object",
+      "required": [
+        "source"
+      ],
+      "properties": {
+        "source": {
+          "type": "object",
+          "properties": {
+            "array_name": {"type": "string"},
+            "uri": {"type": "string"}
+          }
+        },
+        "*": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "offset",
+            "size"
+          ],
+          "properties": {
+            "offset": {"type": "integer"},
+            "size": {"type": "integer"}
+          }
+        }
+      }
+    }
+  }
+}
