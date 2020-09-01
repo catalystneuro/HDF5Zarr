@@ -90,6 +90,22 @@ class HDF5ZarrBase(object):
                 assert_array_equal(hval, zval)
         self._visit_item(_test_dset_val)
 
+    def test_attrs(self):
+        """ test if attributes exist """
+        def _test_attr(zobj, hobj, hobj_info):
+            for name in hobj.attrs:
+                zattr = zobj.attrs[name]
+        self._visit_item(_test_attr)
+
+    def test_read_attrs(self):
+        """ test if attributes are equal """
+        def _test_read_attrs(zobj, hobj, hobj_info):
+            for name in hobj.attrs:
+                hattr = hobj.attrs[name]
+                zattr = zobj.attrs[name]
+                assert_array_equal(zattr, hattr)
+        self._visit_item(_test_read_attrs)
+
     @pytest.fixture(autouse=True)
     def visit_files(self, request):
         # file number
@@ -106,6 +122,8 @@ class HDF5ZarrBase(object):
         # collect flag
         self.fkeep = request.config.getoption("fkeep")
 
+        self._ex = []
+
         # visit objects
         if self.visittype == "objects_only":
             self._visit_item = self.visit_obj_func
@@ -120,8 +138,8 @@ class HDF5ZarrBase(object):
 
         if request.node.rep_setup.passed:
             if request.node.rep_call.failed:
-                if self.fkeep and len(_ex) > 0:
-                    ex, name = _ex[0]
+                if self.fkeep and len(self._ex) > 0:
+                    ex, name = self._ex[0]
                     hobj = self.hfile[name]
                 else:
                     hobj = self.hobj
@@ -133,7 +151,7 @@ class HDF5ZarrBase(object):
                        )""")
 
                 print("executing test failed for", request.node.name, hobj.file.filename)
-                if hobj.file.filename != self._testfilename:
+                if hobj.file.filename != self._testfilename and isinstance(hobj, h5py.Dataset):
                     print(f"""hdf5 Dataset: (
                            name = '{hobj.name}',
                            shape = {hobj.shape},
@@ -146,12 +164,12 @@ class HDF5ZarrBase(object):
                            data = {hobj[()]},
                            )""")
 
-                if self.fkeep and len(_ex) > 1:
-                    ex_m, name_m = _ex[np.argmin([self.hfile[name].size for ex, name in _ex])]
+                if self.fkeep and len(self._ex) > 1:
+                    ex_m, name_m = self._ex[np.argmin([self.hfile[name].size for ex, name in _ex])]
                     if name_m != name:
                         hobj = self.hfile[name_m]
                         print("executing test failed for", request.node.name, hobj.file.filename)
-                        if hobj.file.filename != self._testfilename:
+                        if hobj.file.filename != self._testfilename and isinstance(hobj, h5py.Dataset):
                             print(f"""(
                                    name = '{hobj.name}',
                                    shape = {hobj.shape},
@@ -184,9 +202,11 @@ class HDF5ZarrBase(object):
 
         h5py.h5o.visit(self.hfile.id, _test_obj, info=True)
 
+        self._ex = _ex
+
         # raise only one exception in case of fkeep == True
-        if self.fkeep and len(_ex) > 0:
-            raise _ex[0][0]
+        if self.fkeep and len(self._ex) > 0:
+            raise self._ex[0][0]
 
     def visit_link_func(self, assert_func):
         # visit links
@@ -216,9 +236,11 @@ class HDF5ZarrBase(object):
 
         self.hfile.id.links.visit(_test_obj, info=True)
 
+        self._ex = _ex
+
         # raise only one exception in case of fkeep == True
-        if self.fkeep and len(_ex) > 0:
-            raise _ex[0][0]
+        if self.fkeep and len(self._ex) > 0:
+            raise self._ex[0][0]
 
 
 class TestHDF5Zarr(HDF5ZarrBase):
