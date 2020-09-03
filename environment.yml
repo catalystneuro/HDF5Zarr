@@ -4,3 +4,4 @@ channels:
 dependencies:
   - hdf5>=1.10.5
   - pip
+  - gcc_linux-64
