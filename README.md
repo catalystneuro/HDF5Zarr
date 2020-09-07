@@ -1,5 +1,7 @@
 <strong>Reading HDF5 files with Zarr</strong> building upon [Cloud-Performant NetCDF4/HDF5 Reading with the Zarr Library](https://medium.com/pangeo/cloud-performant-reading-of-netcdf4-hdf5-data-using-the-zarr-library-1a95c5c92314). This allows for efficiently reading HDF5 files stored remotely, and integration with Zarr-based computation tools.
 
+[![codecov](https://codecov.io/gh/catalystneuro/HDF5Zarr/branch/master/graph/badge.svg)](https://codecov.io/gh/catalystneuro/HDF5Zarr)
+
 ## Installation:
 
 Requires latest dev installation of h5py, with HDF5>=1.10.5.
