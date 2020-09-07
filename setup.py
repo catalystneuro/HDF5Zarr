@@ -8,7 +8,7 @@ install_requires = ['numpy',
                     'h5py @ git+https://github.com/h5py/h5py.git',
                     'fsspec',
                     's3fs',
-                    'hdmf @ git+https://github.com/hdmf-dev/hdmf.git@hdf5io_handle_file_obj',
+                    'hdmf',
                     'nwbwidgets']
 
 with open("README.md", "r") as fh:
