@@ -28,6 +28,13 @@ def pytest_addoption(parser):
         action="store_true",
         help="flag to indicate collecting failed objects",
     )
+    parser.addoption(
+        "--objnames",
+        action="append",
+        type="string",
+        default=[],
+        help="name of objects in file to test",
+    )
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -44,6 +51,7 @@ def pytest_runtest_makereport(item, call):
 def pytest_generate_tests(metafunc):
     hdf5files = metafunc.config.getoption('hdf5files')
     disable_max_chunksize = metafunc.config.getoption('disablemaxchunk')
+    objnames = metafunc.config.getoption('objnames')
 
     metafunc.fixturenames.append('fnum')
     if len(hdf5files) != 0:
@@ -56,6 +64,7 @@ def pytest_generate_tests(metafunc):
 
     metafunc.cls.hdf5file_names = hdf5files
     metafunc.cls.disable_max_chunksize = disable_max_chunksize
+    metafunc.cls.objnames = [n.encode() for n in objnames]
     metafunc.cls._testfilename = "_testfile"  # test file name for _testfile, only used if hdf5files_option is False
 
     metafunc.parametrize(argnames='fnum', argvalues=range(len(hdf5files)+int(not metafunc.cls.hdf5files_option)),
