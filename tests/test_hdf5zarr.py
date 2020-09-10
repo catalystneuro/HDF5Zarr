@@ -67,24 +67,134 @@ class HDF5ZarrBase(object):
         """ test if datasets properties are equal """
         def _test_fillvalue(zobj, hobj, hobj_info):
             if hobj_info.type == h5py.h5o.TYPE_DATASET:
-                assert_array_equal(zobj.fill_value, hobj.fillvalue)
+                # skip test for structured array containing object ref, zarr v2.4.1, zarr PR 422
+                dset_type = hobj.id.get_type()
+                if hobj.dtype.names is None:
+                    assert_array_equal(zobj.fill_value, hobj.fillvalue)
+                elif all([dset_type.get_member_class(i) != h5py.h5t.REFERENCE for i in range(dset_type.get_nmembers())]):
+                    for n in self.hobj.dtype.names:
+                        assert_array_equal(zobj.fill_value[n], hobj.fillvalue[n])
         self._visit_item(_test_fillvalue)
 
     ##########################################
     #  dataset read tests                    #
     ##########################################
 
-    def test_zarray_read(self):
+    def test_zarray_read_simple_dtype(self):
         """ test if zarr arrays are read """
         def _test_dsets_read(zobj, hobj, hobj_info):
-            if hobj_info.type == h5py.h5o.TYPE_DATASET:
+            if (hobj_info.type == h5py.h5o.TYPE_DATASET and
+               self._checkdtype_structobjref(hobj) == (False, False) and
+               not h5py.check_vlen_dtype(hobj.dtype)):
                 zval = zobj[()]
         self._visit_item(_test_dsets_read)
 
-    def test_dset_val(self):
+    def test_zarray_read_simple_dtype_objref(self):
+        """ test if zarr struct arrays are read """
+        def _test_dsets_read(zobj, hobj, hobj_info):
+            if (hobj_info.type == h5py.h5o.TYPE_DATASET and
+               self._checkdtype_structobjref(hobj) == (False, True) and
+               not h5py.check_vlen_dtype(hobj.dtype)):
+                zval = zobj[()]
+        self._visit_item(_test_dsets_read)
+
+    def test_zarray_read_struct_dtype_noref(self):
+        """ test if zarr struct arrays are read """
+        def _test_dsets_read(zobj, hobj, hobj_info):
+            if (hobj_info.type == h5py.h5o.TYPE_DATASET and
+               self._checkdtype_structobjref(hobj) == (True, False) and
+               not h5py.check_vlen_dtype(hobj.dtype)):
+                zval = zobj[()]
+        self._visit_item(_test_dsets_read)
+
+    def test_zarray_read_struct_dtype_withobjref(self):
+        """ test if zarr struct arrays are read """
+        def _test_dsets_read(zobj, hobj, hobj_info):
+            if (hobj_info.type == h5py.h5o.TYPE_DATASET and
+               self._checkdtype_structobjref(hobj) == (True, True) and
+               not h5py.check_vlen_dtype(hobj.dtype)):
+                zval = zobj[()]
+        self._visit_item(_test_dsets_read)
+
+    def test_zarray_read_vlenstring(self):
+        """ test if variable length string arrays are read """
+        def _test_dsets_read(zobj, hobj, hobj_info):
+            if (hobj_info.type == h5py.h5o.TYPE_DATASET and
+               self._checkdtype_structobjref(hobj) == (False, False) and
+               h5py.check_vlen_dtype(hobj.dtype)):
+                zval = zobj[()]
+        self._visit_item(_test_dsets_read)
+
+    def test_dset_val_simple_dtype(self):
         """ test if zarr arrays and datasets are equal """
         def _test_dset_val(zobj, hobj, hobj_info):
-            if hobj_info.type == h5py.h5o.TYPE_DATASET:
+            if (hobj_info.type == h5py.h5o.TYPE_DATASET and
+               self._checkdtype_structobjref(hobj) == (False, False) and
+               not h5py.check_vlen_dtype(hobj.dtype)):
+                hval = hobj[()]
+                zval = zobj[()]
+                assert_array_equal(hval, zval)
+        self._visit_item(_test_dset_val)
+
+    def test_dset_val_simple_dtype_objref(self):
+        """ test if zarr arrays and datasets are equal """
+        def _test_dset_val(zobj, hobj, hobj_info):
+            if (hobj_info.type == h5py.h5o.TYPE_DATASET and
+               self._checkdtype_structobjref(hobj) == (False, True) and
+               not h5py.check_vlen_dtype(hobj.dtype)):
+                hval = hobj[()]
+                zval = zobj[()]
+                ref_array_func = np.frompyfunc(lambda x: h5py.h5i.get_name(h5py.h5r.dereference(x, self.hfile.id)), 1, 1)
+                if hobj.shape != ():
+                    hval_str = ref_array_func(hval).astype(str)
+                else:
+                    hval_str = h5py.h5i.get_name(h5py.h5r.dereference(hval, self.hfile.id))
+                    hval_str = hval_str.decode('utf-8')
+                assert_array_equal(hval_str, zval)
+        self._visit_item(_test_dset_val)
+
+    def test_dset_val_struct_dtype_noref(self):
+        """ test if zarr arrays and datasets are equal """
+        def _test_dset_val(zobj, hobj, hobj_info):
+            if (hobj_info.type == h5py.h5o.TYPE_DATASET and
+               self._checkdtype_structobjref(hobj) == (True, False) and
+               not h5py.check_vlen_dtype(hobj.dtype)):
+                hval = hobj[()]
+                zval = zobj[()]
+                for dt_name in hobj.dtype.names:
+                    assert_array_equal(hval[dt_name], zval[dt_name])
+        self._visit_item(_test_dset_val)
+
+    def test_dset_val_struct_dtype_withobjref(self):
+        """ test if zarr arrays and datasets are equal """
+        def _test_dset_val(zobj, hobj, hobj_info):
+            if (hobj_info.type == h5py.h5o.TYPE_DATASET and
+               self._checkdtype_structobjref(hobj) == (True, True) and
+               not h5py.check_vlen_dtype(hobj.dtype)):
+                hval = hobj[()]
+                zval = zobj[()]
+                ref_array_func = np.frompyfunc(lambda x: h5py.h5i.get_name(h5py.h5r.dereference(x, self.hfile.id)), 1, 1)
+                dset_type = hobj.id.get_type()
+                for i in range(dset_type.get_nmembers()):
+                    dt_name = hobj.dtype.names[i]
+                    if dset_type.get_member_class(i) == h5py.h5t.REFERENCE:
+                        if hobj.shape != ():
+                            hval_str = ref_array_func(hval[dt_name]).astype(str)
+                        else:
+                            hval_str = h5py.h5i.get_name(h5py.h5r.dereference(hval[dt_name], self.hfile.id))
+                            hval_str = hval_str.decode('utf-8')
+                        assert_array_equal(hval_str, zval[dt_name])
+                    else:
+                        assert_array_equal(hval[dt_name], zval[dt_name])
+        self._visit_item(_test_dset_val)
+
+    def test_dset_val_vlenstring(self):
+        """ test if zarr arrays and datasets are equal """
+        def _test_dset_val(zobj, hobj, hobj_info):
+            if (hobj_info.type == h5py.h5o.TYPE_DATASET and
+               self._checkdtype_structobjref(hobj) == (False, False) and
+               h5py.check_vlen_dtype(hobj.dtype)):
+                hobj = hobj.asstr()  # wrapper to read data as python str
                 hval = hobj[()]
                 zval = zobj[()]
                 assert_array_equal(hval, zval)
@@ -165,7 +275,7 @@ class HDF5ZarrBase(object):
                            )""")
 
                 if self.fkeep and len(self._ex) > 1:
-                    ex_m, name_m = self._ex[np.argmin([self.hfile[name].size for ex, name in _ex])]
+                    ex_m, name_m = self._ex[np.argmin([self.hfile[name].size for ex, name in self._ex])]
                     if name_m != name:
                         hobj = self.hfile[name_m]
                         print("executing test failed for", request.node.name, hobj.file.filename)
@@ -200,7 +310,12 @@ class HDF5ZarrBase(object):
                 except AssertionError as ex:
                     _ex.append([ex, name])
 
-        h5py.h5o.visit(self.hfile.id, _test_obj, info=True)
+        if self.objnames == []:
+            h5py.h5o.visit(self.hfile.id, _test_obj, info=True)
+        else:
+            for name in self.objnames:
+                hobj_info = h5py.h5g.get_objinfo(self.hfile[name].id)
+                _test_obj(name, hobj_info)
 
         self._ex = _ex
 
@@ -234,13 +349,29 @@ class HDF5ZarrBase(object):
                 # TO DO
                 pass
 
-        self.hfile.id.links.visit(_test_obj, info=True)
+        if self.objnames == []:
+            self.hfile.id.links.visit(_test_obj, info=True)
+        else:
+            for name in self.objnames:
+                hlink_info = self.hfile.id.links.get_info(name)
+                _test_obj(name, hlink_info)
 
         self._ex = _ex
 
         # raise only one exception in case of fkeep == True
         if self.fkeep and len(self._ex) > 0:
             raise self._ex[0][0]
+
+    @classmethod
+    def _checkdtype_structobjref(cls, hobj):
+        """ return 2-tuple indicating struct array and object reference dtype """
+        dset_type = hobj.id.get_type()
+        if hobj.dtype.names is None:
+            return (False,  # simple dtype
+                    dset_type.get_class() == h5py.h5t.REFERENCE)
+        else:
+            return (True,  # struct dtype
+                    any([dset_type.get_member_class(i) == h5py.h5t.REFERENCE for i in range(dset_type.get_nmembers())]))
 
 
 class TestHDF5Zarr(HDF5ZarrBase):
@@ -264,12 +395,19 @@ class TestHDF5Zarr(HDF5ZarrBase):
         cls.n_dsetsoftlink = 1  # number of soft links to another dataset in each group
         cls.n_dsethardlink = 1  # TO DO number of hard links to another dataset in each group
 
-        cls.n_objectrefdset = 1  # TO DO number of object reference datasets in each group
-        cls.n_structarraywithobjectrefdset = 1  # TO DO number of struct array datasets containing object ref dtype in each group
-        cls.n_structarrayobjectrefdtype = 1  # TO DO number of object ref dtypes if used in a struct array
+        cls.n_objectrefdset = 1  # number of object reference datasets in each group
+        cls.n_objectrefdsetmaxdim = 4  # maximum number of dimensions in an object reference datasets
 
-        cls.n_structarrayregulardset = 1  # TO DO number of struct array datasets without object refernce dtype in each group
-        cls.n_structarraydtypelen = 4  # TO DO length of struct array dtypes in datasets
+        cls.n_structarraywithobjrefdset = 1  # number of struct array datasets containing object ref dtype in each group
+        cls.n_structarrayobjrefdtype = 1  # number of object ref dtypes if used in a struct array
+
+        cls.n_structarrayregulardset = 1  # number of struct array datasets without object refernce dtype in each group
+        cls.n_structarraydtypelen = 4  # length of struct array dtypes in datasets
+
+        cls.n_vlenstringdset = 1  # number of variable length string datasets in each group
+        cls.n_vlenstringdsetmaxlen = 2000  # max length of strings in variable length datasets
+
+        cls.n_dsetmaxdim = 4  # maximum number of dimensions
 
         cls.n_attributes_min = 5  # min number of attributes for each object
 
@@ -399,6 +537,189 @@ class TestHDF5Zarr(HDF5ZarrBase):
 
                 dset_list.append(dset)
 
+        # create variable length string datasets
+        for g in group_list:
+            for i in range(cls.n_vlenstringdset):
+                k = i + srand.randint(0, cls.n_dsetmaxdim)
+                shape = srand.choices(range(1, int(60**(1/(k or 1)))+1), k=k)  # dseti has k dimensions
+                size = int(np.prod(shape))
+                dtype = h5py.string_dtype(encoding='utf-8')
+                str_len = np.frombuffer(rand_rng.bytes(size*8), dtype=np.uint64) % cls.n_vlenstringdsetmaxlen
+                data = np.array([''.join([chr(rand_rng.integers(0x0020, 0x03ff)) for _ in range(i)])
+                                 for i in str_len], dtype=dtype)
+
+                # create_dataset options comptability
+                if len(shape) > 0:
+                    chunks = next(iter_chunks)
+                else:
+                    chunks = None
+                    # compression = None
+                    # compression_opts = None
+                    # shuffle = None
+                    # fletcher32 = None
+                    # scaleoffset = None
+                fillvalue = None
+
+                dset = g.create_dataset(
+                           name='dsetvlenstring'+str(i),
+                           shape=shape,
+                           data=data,
+                           dtype=dtype,
+                           chunks=chunks,
+                           maxshape=None if chunks is None else tuple(
+                                          (np.array(shape) + rand_rng.integers(0, 5))*rand_rng.integers(1, 5, size=len(shape))),
+                           track_times=next(iter_track_times),
+                           track_order=next(iter_track_order),
+                           fillvalue=fillvalue
+                           )
+
+                dset_list.append(dset)
+
+        # create struct array datasets
+        for g in group_list:
+            # TO DO, add test with datasets with zero in dimensions
+            for i in range(cls.n_structarrayregulardset):
+                k = i + srand.randint(0, cls.n_dsetmaxdim)
+                shape = srand.choices(range(1, 90//(k or 1)), k=k)  # dseti has k dimensions
+                size = int(np.prod(shape))
+                dtype = [(chr(97+j), next(iter_dtypes)) for j in range(cls.n_structarraydtypelen)]
+                data = np.empty(shape=shape, dtype=dtype)
+                for j in range(len(dtype)):
+                    dt_name, dt = dtype[j]
+                    if dt == np.bool_:
+                        data_ = np.frombuffer(rand_rng.bytes(size*8), dtype=np.int64) > 0
+                    elif dt == np.datetime64:
+                        data_ = np.datetime64('1970-01-01T00:00:00', 'ns')+np.frombuffer(rand_rng.bytes(size*8), dtype=np.uint64)
+                        dtype[j] = (dt_name, h5py.opaque_dtype(data_.dtype))
+                        data_ = data_.astype(dtype[j][1])
+                    else:
+                        data_ = np.frombuffer(rand_rng.bytes(size*np.dtype(dt).itemsize), dtype=dt)
+
+                    data[dt_name] = data_.reshape(shape)
+
+                # create_dataset options comptability
+                if len(shape) > 0:
+                    chunks = next(iter_chunks)
+                else:
+                    chunks = None
+                    # compression = None
+                    # compression_opts = None
+                    # shuffle = None
+                    # fletcher32 = None
+                    # scaleoffset = None
+                fillvalue = None if (next(iter_fillvalue) is None or
+                                     data.dtype.char == 'M') else data.reshape(size)[rand_rng.integers(0, size)]
+
+                dset = g.create_dataset(
+                           name='dsetstructarray'+str(i),
+                           shape=shape,
+                           data=data,
+                           dtype=dtype,
+                           chunks=chunks,
+                           maxshape=None if chunks is None else tuple(
+                                          (np.array(shape) + rand_rng.integers(0, 5))*rand_rng.integers(1, 5, size=len(shape))),
+                           track_times=next(iter_track_times),
+                           track_order=next(iter_track_order),
+                           fillvalue=fillvalue
+                           )
+
+                dset_list.append(dset)
+
+        # create object reference datasets
+        for g in group_list:
+            for i in range(cls.n_objectrefdset):
+                k = i + srand.randint(0, cls.n_objectrefdsetmaxdim)
+                shape = srand.choices(range(1, int(60**(1/(k or 1)))+1), k=k)  # dseti has k dimensions
+                size = int(np.prod(shape))
+                dtype = h5py.ref_dtype
+
+                obj_list = dset_list + group_list
+                data = np.array([srand.choice(obj_list).ref for _ in range(size)])
+
+                # create_dataset options comptability
+                if len(shape) > 0:
+                    chunks = next(iter_chunks)
+                else:
+                    chunks = None
+                    # compression = None
+                    # compression_opts = None
+                    # shuffle = None
+                    # fletcher32 = None
+                    # scaleoffset = None
+
+                fillvalue = None
+
+                dset = g.create_dataset(
+                           name='dsetobjref'+str(i),
+                           shape=shape,
+                           data=data,
+                           dtype=dtype,
+                           chunks=chunks,
+                           maxshape=None if chunks is None else tuple(
+                                          (np.array(shape) + rand_rng.integers(0, 5))*rand_rng.integers(1, 5, size=len(shape))),
+                           track_times=next(iter_track_times),
+                           track_order=next(iter_track_order),
+                           fillvalue=fillvalue
+                           )
+
+                dset_list.append(dset)
+
+        # create struct array datasets with object reference
+        for g in group_list:
+            # TO DO, add test with datasets with zero in dimensions
+            for i in range(cls.n_structarraywithobjrefdset):
+                k = i + srand.randint(0, cls.n_objectrefdsetmaxdim)
+                shape = srand.choices(range(1, int(60**(1/(k or 1)))+1), k=k)  # dseti has i dimensions
+                size = int(np.prod(shape))
+                dtypeobjind = rand_rng.choice(range(cls.n_structarraydtypelen), size=cls.n_structarrayobjrefdtype, replace=False)
+                dtype = [(chr(97+j), h5py.ref_dtype if j in dtypeobjind else next(iter_dtypes))
+                         for j in range(cls.n_structarraydtypelen)]
+
+                data = np.empty(shape=shape, dtype=dtype)
+                for j in range(len(dtype)):
+                    dt_name, dt = dtype[j]
+                    if dt == h5py.ref_dtype:
+                        obj_list = dset_list + group_list
+                        data_ = np.array([srand.choice(obj_list).ref for _ in range(size)])
+                    elif dt == np.bool_:
+                        data_ = np.frombuffer(rand_rng.bytes(size*8), dtype=np.int64) > 0
+                    elif dt == np.datetime64:
+                        data_ = np.datetime64('1970-01-01T00:00:00', 'ns')+np.frombuffer(rand_rng.bytes(size*8), dtype=np.uint64)
+                        dtype[j] = (dt_name, h5py.opaque_dtype(data_.dtype))
+                        data_ = data_.astype(dtype[j][1])
+                    else:
+                        data_ = np.frombuffer(rand_rng.bytes(size*np.dtype(dt).itemsize), dtype=dt)
+
+                    data[dt_name] = data_.reshape(shape)
+
+                # create_dataset options comptability
+                if len(shape) > 0:
+                    chunks = next(iter_chunks)
+                else:
+                    chunks = None
+                    # compression = None
+                    # compression_opts = None
+                    # shuffle = None
+                    # fletcher32 = None
+                    # scaleoffset = None
+                fillvalue = None if (next(iter_fillvalue) is None or
+                                     data.dtype.char == 'M') else data.reshape(size)[rand_rng.integers(0, size)]
+
+                dset = g.create_dataset(
+                           name='dsetstructarraywobjref'+str(i),
+                           shape=shape,
+                           data=data,
+                           dtype=dtype,
+                           chunks=chunks,
+                           maxshape=None if chunks is None else tuple(
+                                          (np.array(shape) + rand_rng.integers(0, 5))*rand_rng.integers(1, 5, size=len(shape))),
+                           track_times=next(iter_track_times),
+                           track_order=next(iter_track_order),
+                           fillvalue=fillvalue
+                           )
+
+                dset_list.append(dset)
+
         # create softlinks to datasets
         for g in group_list:
             for i in range(cls.n_dsetsoftlink):
@@ -469,6 +790,20 @@ class TestHDF5Zarr(HDF5ZarrBase):
             track_times=None,
             track_order=None,
             fillvalue=1,
+            )
+
+        shape = (20, 3, 4, 13)
+        data = np.array([cls.srand.choice([v for k, v in hfile.items()]).ref for _ in range(np.prod(shape)-1)] + [hfile.ref])
+        hfile.create_dataset(
+            name='dsetobjref',
+            shape=shape,
+            chunks=(10, 2, 4, 13),
+            data=data,
+            dtype=h5py.ref_dtype,
+            maxshape=(72, 28, 16, 68),
+            track_times=None,
+            track_order=None,
+            fillvalue=None,
             )
 
         return hfile

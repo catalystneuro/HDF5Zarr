@@ -13,7 +13,7 @@ jobs:
         with:
           auto-update-conda: true
           python-version: ${{ matrix.python-version }}
-      - name: install HDF5Zarr, run tests
+      - name: install HDF5 and h5py
         shell: bash -l {0}
         run: |
           conda install -c conda-forge fsspec numcodecs
@@ -21,7 +21,13 @@ jobs:
           conda install gcc_linux-64
           pip install numpy cython pkgconfig
           HDF5_DIR=$CONDA pip install --no-binary=h5py git+https://github.com/h5py/h5py.git
+      - name: install HDF5Zarr
+        shell: bash -l {0}
+        run: |
           pip install -e .
+      - name: run tests
+        shell: bash -l {0}
+        run: |
           pip install pytest
           pip install pytest-cov
           pytest --cov=./ --cov-report=xml
