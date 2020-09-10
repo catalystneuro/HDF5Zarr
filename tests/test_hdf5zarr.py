@@ -194,6 +194,7 @@ class HDF5ZarrBase(object):
             if (hobj_info.type == h5py.h5o.TYPE_DATASET and
                self._checkdtype_structobjref(hobj) == (False, False) and
                h5py.check_vlen_dtype(hobj.dtype)):
+                hobj = hobj.asstr()  # wrapper to read data as python str
                 hval = hobj[()]
                 zval = zobj[()]
                 assert_array_equal(hval, zval)
