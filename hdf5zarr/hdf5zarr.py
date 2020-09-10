@@ -89,7 +89,7 @@ class VLenHDF5String(numcodecs.abc.Codec):
             ids_sorted_i = ids_sorted[p[i]:p[i+1]]
             sorter = np.argsort(id_list)
             vlen_str_index = np.searchsorted(id_list, ids_sorted_i, sorter=sorter)
-            vlen_array[p[i]:p[i+1]] = np.array(vlen_list)[sorter[vlen_str_index]].astype(str)
+            vlen_array[p[i]:p[i+1]] = np.chararray.decode(np.array(vlen_list)[sorter[vlen_str_index]], encoding='utf-8')
 
         vlen_array = vlen_array[np.argsort(sort_args)]
 
@@ -498,9 +498,10 @@ class HDF5Zarr(object):
                           'size': dsid_string_storage_size,  # size already allocated
                           'gcol_offsets': gcol_offsets}}  # data offsets
         else:
-            # TO DO #
-
             for key in info:
+                if key == 'source' or key == 'array_name':
+                    continue
+
                 bytes_offset = info[key]['offset']
                 blob_size = info[key]['size']
 
@@ -645,17 +646,21 @@ class HDF5Zarr(object):
                 if dset_type.get_member_class(dt_i) == h5py.h5t.REFERENCE:
                     dtype_ += [(dtname, object)]
                     if dset.fillvalue[dt_i]:
-                        dset_fillvalue[dt_i] = h5py.h5o.get_info([h5py.h5r.dereference(
-                                                                  dset.fillvalue[dt_i], self.file.id)]).addr
+                        dset_fillvalue[dt_i] = h5py.h5o.get_info(h5py.h5r.dereference(
+                                                                 dset.fillvalue[dt_i], self.file.id)).addr
                     else:
                         dset_fillvalue[dt_i] = 0
                 else:
                     dtype_ += [(dtname, dset.dtype.base[dt_i])]
 
-            dtype_ = np.dtype(dtype_)
             # currently not using the fill value with structured array
             # containing object, zarr v2.4.1, zarr PR 422
-            dset_fillvalue = None
+            if all([dt != object for dtname, dt in dtype_]):
+                dset_fillvalue = dset.fillvalue
+            else:
+                dset_fillvalue = None
+
+            dtype_ = np.dtype(dtype_)
 
             zarray = zgroup.create_dataset(dset.name, shape=dset.shape,
                                            dtype=dtype_,
@@ -760,7 +765,6 @@ class HDF5Zarr(object):
                 info['source'].update(dtype_refs)
             if object_codec is not None:
                 info.update(self.vlen_storage_info(dset, info))
-
             FileChunkStore.chunks_info(zarray, info)
 
     @staticmethod
@@ -1038,21 +1042,32 @@ class FileChunkStore(MutableMapping):
                                  '\'dtype\' key missing. Unable to check for Object References')
 
             # get root reference metadata. Contains hdf5 object addresses
-            address_key = self._get_reference_key('')
-            address_key = self._ensure_dict(self._store[address_key])
+            ref_key = self._get_reference_key('')
+            address_key = self._ensure_dict(self._store[ref_key])
             address_key_source = address_key.pop('source')
             address_key = {int(k): v for k, v in address_key.items()}
 
+            if chunk_loc['size'] < zarray_chunksize:
+                address_key.setdefault(0, '')
+
             # function to convert references to string
-            ref_array_func = np.frompyfunc(lambda x: address_key[int(x)], 1, 1)
+            # for hanging chunks
+            chunkedge = zarray_key['chunks'] - (
+                zarray_key['chunks']*np.array([int(i) for i in PurePosixPath(chunk_key).name.split('.')])+zarray_key['chunks'])
+            if any(chunkedge < 0):
+                ref_array_func = np.frompyfunc(lambda x: address_key.setdefault(int(x), ''), 1, 1)
+            else:
+                # regular chunks
+                ref_array_func = np.frompyfunc(lambda x: address_key[int(x)], 1, 1)
+
             if dtype_str == '|O':
 
                 if zref_dtype != "Object Reference":
                     raise TypeError
                 dtype_ = np.dtype(f'uint{address_key_source["offset_byte_size"]*8}')
                 data_array = np.frombuffer(bytes, dtype=dtype_)
-                data_bytes = np.empty(shape=zarray_key['shape'], dtype=dtype_str)
-                data_bytes[...] = ref_array_func(data_array)
+                data_bytes = np.empty(shape=zarray_key['chunks'], dtype=dtype_str)
+                data_bytes[...] = ref_array_func(data_array).reshape(data_bytes.shape)
             else:
                 # structured array
                 try:
@@ -1074,14 +1089,13 @@ class FileChunkStore(MutableMapping):
                 dtype_ = np.dtype(dtype_)
 
                 data_array = np.frombuffer(bytes, dtype=dtype_)
-                data_bytes = np.empty(shape=zarray_key['shape'], dtype=dtype_str)
+                data_bytes = np.empty(shape=zarray_key['chunks'], dtype=dtype_str)
 
                 for dtname, dt in zref_dtype.items():
                     if dt == "Object Reference":
-                        data_bytes[dtname] = ref_array_func(data_array[dtname])
+                        data_bytes[dtname] = ref_array_func(data_array[dtname]).reshape(data_bytes.shape)
                     else:
-                        data_bytes[dtname] = data_array[dtname]
-
+                        data_bytes[dtname] = data_array[dtname].reshape(data_bytes.shape)
             return data_bytes
         else:
             return bytes
