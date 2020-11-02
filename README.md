@@ -30,12 +30,12 @@ Follow h5py instructions for [custom installation](https://h5py.readthedocs.io/e
 For example:
 ##### Conda:
 ``` bash
-$ HDF5_DIR=$CONDA_PREFIX pip install --no-binary=h5py git+https://github.com/h5py/h5py.git
+$ HDF5_DIR=$CONDA_PREFIX pip install --no-binary=h5py h5py
 ```
 
 ##### Source installation:
 ```bash
-$ HDF5_DIR=/path/to/hdf5 pip install --no-binary=h5py git+https://github.com/h5py/h5py.git
+$ HDF5_DIR=/path/to/hdf5 pip install --no-binary=h5py h5py
 ```
 
 ### Install HDF5Zarr
