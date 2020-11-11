@@ -5,6 +5,10 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest]
+        python-version: [3.8, 3.9]
+        exclude:
+          - os: ubuntu-latest
+            python-version: 3.9
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container }}
     steps:
@@ -20,7 +24,7 @@ jobs:
           conda install "hdf5>=1.10.5"
           conda install gcc_linux-64
           pip install numpy cython pkgconfig
-          HDF5_DIR=$CONDA pip install --no-binary=h5py git+https://github.com/h5py/h5py.git
+          HDF5_DIR=$CONDA pip install --no-binary=h5py h5py
       - name: install HDF5Zarr
         shell: bash -l {0}
         run: |
