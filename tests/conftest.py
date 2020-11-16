@@ -7,7 +7,7 @@ def pytest_addoption(parser):
     parser.addoption(
         "--hdf5files",
         action="append",
-        type="string",
+        type=str,
         default=[],
         help="list of hdf5 files to test",
     )
@@ -31,7 +31,7 @@ def pytest_addoption(parser):
     parser.addoption(
         "--objnames",
         action="append",
-        type="string",
+        type=str,
         default=[],
         help="name of objects in file to test",
     )

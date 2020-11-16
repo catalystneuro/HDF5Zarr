@@ -474,8 +474,11 @@ class HDF5Zarr(object):
             return dict()
 
         dsid = dset.id
-        file_handle = self.file.id.get_vfd_handle()
-        file_io = io.FileIO(file_handle, closefd=False)
+        if isinstance(self.filename, fsspec.spec.AbstractBufferedFile):
+            file_io = self.filename.fs.open(self.filename.details['name'], 'rb')
+        else:
+            file_handle = self.file.id.get_vfd_handle()
+            file_io = io.FileIO(file_handle, closefd=False)
         if dset.file.userblock_size != 0:
             # TO DO #
             pass
