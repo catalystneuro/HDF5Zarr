@@ -116,7 +116,7 @@ class HDF5Zarr(object):
     def __init__(self, filename: str, hdf5group: str = None,
                  store: Union[MutableMapping, str, Path] = None, store_path: str = None,
                  store_mode: str = 'a', LRU: bool = False, LRU_max_size: int = 2**30,
-                 max_chunksize=2*2**20):
+                 max_chunksize=2*2**20, driver: str = None):
 
         """
         Args:
@@ -141,6 +141,8 @@ class HDF5Zarr(object):
                                          if store is zarr.LRUStoreCache, or LRU argument is True
             max_chunksize:               maximum chunk size to use when creating zarr hierarchy, this is useful if
                                          only a small slice of data needs to be read
+            driver:                      driver name to pass to h5py
+
         """
         # Verify arguments
         if not isinstance(LRU, bool):
@@ -193,7 +195,7 @@ class HDF5Zarr(object):
         self.hdf5group = hdf5group
         self.filename = filename
         if self.store_mode != 'r':
-            self.file = h5py.File(self.filename, mode='r')
+            self.file = h5py.File(self.filename, mode='r', driver=driver)
             self.group = self.file[self.hdf5group] if self.hdf5group is not None else self.file
             self.create_zarr_hierarchy(self.group, self.zgroup)
             self.file.close()
@@ -243,7 +245,7 @@ class HDF5Zarr(object):
     def _fill_regfilters(self):
 
         # h5py.h5z.FILTER_DEFLATE == 1
-        self._hdf5_regfilters_subset[1] = numcodecs.GZip
+        self._hdf5_regfilters_subset[1] = numcodecs.Zlib
 
         # h5py.h5z.FILTER_SHUFFLE == 2
         self._hdf5_regfilters_subset[2] = None
@@ -475,7 +477,9 @@ class HDF5Zarr(object):
 
         dsid = dset.id
         if isinstance(self.filename, fsspec.spec.AbstractBufferedFile):
-            file_io = self.filename.fs.open(self.filename.details['name'], 'rb')
+            file_io = fsspec.open(self.filename.details['name'], 'rb').open()
+        elif self.file.driver == 'ros3':
+            file_io = fsspec.open(self.filename, 'rb').open()
         else:
             file_handle = self.file.id.get_vfd_handle()
             file_io = io.FileIO(file_handle, closefd=False)
