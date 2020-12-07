@@ -61,7 +61,9 @@ class HDF5ZarrBase(object):
                 else:
                     chunks = hobj.chunks
                 assert zobj.chunks == chunks
-        self._visit_item(_test_chunks)
+        # skip if max_chunksize is not None
+        if self.hdf5zarr.max_chunksize is None:
+            self._visit_item(_test_chunks)
 
     def test_dset_properties_fillvalue(self):
         """ test if datasets properties are equal """
@@ -150,7 +152,10 @@ class HDF5ZarrBase(object):
                 else:
                     hval_str = h5py.h5i.get_name(h5py.h5r.dereference(hval, self.hfile.id))
                     hval_str = hval_str.decode('utf-8')
-                assert_array_equal(hval_str, zval)
+                if self.hfile.name == '/':
+                    assert_array_equal(hval_str, zval)
+                else:
+                    assert_array_equal(np.frompyfunc(lambda x: x if x.startswith(self.hfile.name) else '', 1, 1)(hval_str), zval)
         self._visit_item(_test_dset_val)
 
     def test_dset_val_struct_dtype_noref(self):
@@ -183,7 +188,10 @@ class HDF5ZarrBase(object):
                         else:
                             hval_str = h5py.h5i.get_name(h5py.h5r.dereference(hval[dt_name], self.hfile.id))
                             hval_str = hval_str.decode('utf-8')
-                        assert_array_equal(hval_str, zval[dt_name])
+                        if self.hfile.name == '/':
+                            assert_array_equal(hval_str, zval[dt_name])
+                        else:
+                            assert_array_equal(np.frompyfunc(lambda x: x if x.startswith(self.hfile.name) else '', 1, 1)(hval_str), zval[dt_name])
                     else:
                         assert_array_equal(hval[dt_name], zval[dt_name])
         self._visit_item(_test_dset_val)
@@ -385,7 +393,7 @@ class TestHDF5Zarr(HDF5ZarrBase):
                                          np.complex64, np.complex256, np.float128, np.complex128,
                                          np.datetime64]))
         cls.dset_dtypes = cls.attribute_dtypes
-        cls.depth = 4  # nested groups depth
+        cls.depth = 3  # nested groups depth
 
         # all n_* are per group or per object
         cls.n_dsets = 4  # number of regular (or scalar) datasets without object references or struct array dtypes in each group
@@ -430,24 +438,45 @@ class TestHDF5Zarr(HDF5ZarrBase):
         # track which temporary files are already saved.
         # if hdf5files_option is passed, mark them as already saved
         num_files = len(cls.file_list)
-        cls.fnum_keep = {i: cls.hdf5files_option for i in range(1, num_files)}
+        cls.num_files = num_files
+        cls.fnum_keep = {i: cls.hdf5files_option for i in range(0, num_files)}
         # do not save "_testfile"
         cls.fnum_keep[0] = True
 
+        group_names = []
+        def _get_groups(name, info):
+            nonlocal group_names
+            if info.type == h5py.h5o.TYPE_GROUP:
+                group_names.append(name.decode('utf-8'))
+
+        if cls.numsubgroup != 0:
+            # len(cls.ids_subgroup) == num_files*cls.numsubgroup
+            cls.file_list += cls.file_list[:num_files]*cls.numsubgroup
+            cls.hdf5zarr_list += [None]*num_files*cls.numsubgroup
+            for i in range(num_files, num_files*(1+cls.numsubgroup)):
+                group_names = []
+                h5py.h5o.visit(cls.file_list[i].id, _get_groups, info=True)
+                group_names.sort()
+                if len(group_names) != 0:
+                    hdf5group = group_names[(i-num_files)//num_files if len(group_names) > (i-num_files)//num_files else -1]  # select next group in sorted group names
+                else:
+                    hdf5group = None
+                cls.hdf5zarr_list[i] = HDF5Zarr(cls.file_list[i].filename, hdf5group=hdf5group)
+                cls.file_list[i] = cls.file_list[i][hdf5group or '/']
+
         if not cls.disable_max_chunksize:
-            cls.file_list = cls.file_list*3
+            # len(cls.ids_maxchunksize) == num_files*int(not disable_max_chunksize)*cls.num_maxchunksize
+            cls.file_list += cls.file_list[:num_files]*2
             cls.hdf5zarr_list += [None]*num_files*2
-            for i in range(num_files, num_files*2):
-                print(i)
+            for i in range(len(cls.file_list)-2*num_files, len(cls.file_list)-num_files):
                 cls.hdf5zarr_list[i] = HDF5Zarr(cls.file_list[i].filename, max_chunksize=1000)
-            for i in range(num_files*2, num_files*3):
+            for i in range(len(cls.file_list)-num_files, len(cls.file_list)):
                 cls.hdf5zarr_list[i] = HDF5Zarr(cls.file_list[i].filename, max_chunksize=2**cls.srand.randint(10, 20))
 
     @classmethod
     def teardown_class(cls):
-        for f in cls.file_list:
-            f.delete = True
-            f.close()
+        for f in cls.file_list[:cls.num_files]:
+            f.file.close()
 
     @classmethod
     def _create_file(cls, name):

@@ -156,8 +156,7 @@ class HDF5Zarr(object):
                               recieved {max_chunksize}, type: {type(max_chunksize)}")
         self.max_chunksize = max_chunksize
 
-        # store, store_path, and store_mode are passed through to zarr
-        self.store_path = store_path
+        # store and store_mode are passed through to zarr
         self.store_mode = store_mode
         if store is not None and LRU is True and not isinstance(store, zarr.LRUStoreCache):
             self.store = zarr.LRUStoreCache(store, max_size=self.LRU_max_size)
@@ -174,6 +173,12 @@ class HDF5Zarr(object):
         # create zarr format hierarchy for datasets and attributes compatible with hdf5 file,
         # dataset contents are not copied, unless it contains variable-length strings
 
+        if hdf5group is not None and not isinstance(hdf5group, str):
+            raise TypeError(f"Expected str for hdf5group, recieved {type(hdf5group)}")
+        if hdf5group is not None and store_path is None:
+            self.store_path = hdf5group  # store_path is passed to zarr
+        else:
+            self.store_path = store_path
         self.zgroup = zarr.open_group(self.store, mode=self.store_mode, path=self.store_path)
         if self.store is None:
             self.store = self.zgroup.store
@@ -190,8 +195,6 @@ class HDF5Zarr(object):
                 self.uri = ''
 
         # Access hdf5 file and create zarr hierarchy
-        if hdf5group is not None and not isinstance(hdf5group, str):
-            raise TypeError(f"Expected str for hdf5group, recieved {type(hdf5group)}")
         self.hdf5group = hdf5group
         self.filename = filename
         if self.store_mode != 'r':
@@ -1059,22 +1062,19 @@ class FileChunkStore(MutableMapping):
 
             # function to convert references to string
             # for hanging chunks
-            chunkedge = zarray_key['chunks'] - (
+            chunkedge = zarray_key['shape'] - (
                 zarray_key['chunks']*np.array([int(i) for i in PurePosixPath(chunk_key).name.split('.')])+zarray_key['chunks'])
-            if any(chunkedge < 0):
-                ref_array_func = np.frompyfunc(lambda x: address_key.setdefault(int(x), ''), 1, 1)
-            else:
-                # regular chunks
-                ref_array_func = np.frompyfunc(lambda x: address_key[int(x)], 1, 1)
 
+            ref_array_func = np.frompyfunc(lambda x: address_key[int(x)] if int(x) in address_key else '', 1, 1)
+            chunkedge_slice = tuple(slice(None,None if c>=0 else c) for c in chunkedge)
             if dtype_str == '|O':
 
                 if zref_dtype != "Object Reference":
                     raise TypeError
                 dtype_ = np.dtype(f'uint{address_key_source["offset_byte_size"]*8}')
-                data_array = np.frombuffer(bytes, dtype=dtype_)
+                data_array = np.frombuffer(bytes, dtype=dtype_).reshape(zarray_key['chunks'])[chunkedge_slice]
                 data_bytes = np.empty(shape=zarray_key['chunks'], dtype=dtype_str)
-                data_bytes[...] = ref_array_func(data_array).reshape(data_bytes.shape)
+                data_bytes[chunkedge_slice] = ref_array_func(data_array)
             else:
                 # structured array
                 try:
@@ -1095,14 +1095,14 @@ class FileChunkStore(MutableMapping):
                           for dtname, dt in dtype_str]
                 dtype_ = np.dtype(dtype_)
 
-                data_array = np.frombuffer(bytes, dtype=dtype_)
+                data_array = np.frombuffer(bytes, dtype=dtype_).reshape(zarray_key['chunks'])[chunkedge_slice]
                 data_bytes = np.empty(shape=zarray_key['chunks'], dtype=dtype_str)
 
                 for dtname, dt in zref_dtype.items():
                     if dt == "Object Reference":
-                        data_bytes[dtname] = ref_array_func(data_array[dtname]).reshape(data_bytes.shape)
+                        data_bytes[dtname][chunkedge_slice] = ref_array_func(data_array[dtname])
                     else:
-                        data_bytes[dtname] = data_array[dtname].reshape(data_bytes.shape)
+                        data_bytes[dtname][chunkedge_slice] = data_array[dtname]
             return data_bytes
         else:
             return bytes

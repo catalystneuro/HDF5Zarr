@@ -19,7 +19,7 @@ df["method"] = df["call item"].apply(lambda s: " ".join(s.split()[0:2]))
 
 # set up the plot
 sns.set_theme(style="ticks")
-sns.set(style="whitegrid", context="notebook")
+sns.set(style="whitegrid", context="notebook", rc={"xtick.bottom" : True, 'xtick.minor.visible': True})
 sns_palette = "colorblind"
 sns_colors = sns.color_palette(sns_palette, n_colors=10)
 sns_colors[0]=sns_colors[1]
@@ -51,14 +51,12 @@ ax1.axvline(line_at, color="k", clip_on=False, zorder=0)
 hue_order = sorted(df["method"].unique())
 sns.boxplot(x='time (sec)', y='label', data=df, hue='method', hue_order=hue_order, width=0.52, linewidth=1, fliersize=0, ax=ax1, order=y_label_order)
 legend_lines_ax1, legend_labels_ax1 = ax1.get_legend_handles_labels()  # save legend
-sns.swarmplot(x='time (sec)', y='label', data=df, size=4, hue='method', hue_order=hue_order, ax=ax1, dodge=False, orient='h', order=y_label_order)
+sns.swarmplot(x='time (sec)', y='label', data=df, size=7.5, hue='method', hue_order=hue_order, ax=ax1, dodge=False, orient='h', order=y_label_order)
 # remove swarmplot legend
 legend_ax1 = ax1.legend()
 legend_ax1.remove()
 # restore legend
 legend_ax1 = ax1.legend(legend_lines_ax1, legend_labels_ax1, loc="lower right")
-# bring Read Time to the front
-ax1.collections[0].zorder = ax1.collections[-1].zorder+1
 # add labels
 xticks = np.array([line_at, *ax1.get_xticks()])
 xticks.sort()
@@ -69,13 +67,13 @@ ax1.set_xlabel("Time (Sec)\n", x=0.5)
 ax1.set_ylabel("Dataset: /processing/ecephys/SpikeWaveforms8/data\n Shape: [308092, 32, 1],     Chunk size: [9628, 2, 1],     Chunk count ~ [32, 16, 1]", labelpad=25)
 legend_ax1.set_title("")
 # set xbound
-xbound = ( -0.18, df["time (sec)"].max()*1.05)
+xbound = ( -0.18, df["time (sec)"].max()*1.25)
 if log_axis:
     ax1.set_xbound([line_at/(10**(np.log10(xbound[1]/line_at)/(xbound[1]/0.18))),xbound[1]])
 else:
     ax1.set_xbound(xbound)
 # Tweak the visual presentation
-ax1.xaxis.grid(False)
+ax1.xaxis.grid(True, which='both')
 ax1.yaxis.grid(True)
 sns.despine(left=True, bottom=False)
 
