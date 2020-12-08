@@ -24,6 +24,13 @@ def pytest_addoption(parser):
         help="flag to disable testing max_chunksize argument",
     )
     parser.addoption(
+        "--numsubgroup",
+        action="store",
+        type=int,
+        default=3,
+        help="number of runs testing hdf5group argument",
+    )
+    parser.addoption(
         "--fkeep",
         action="store_true",
         help="flag to indicate collecting failed objects",
@@ -51,29 +58,37 @@ def pytest_runtest_makereport(item, call):
 def pytest_generate_tests(metafunc):
     hdf5files = metafunc.config.getoption('hdf5files')
     disable_max_chunksize = metafunc.config.getoption('disablemaxchunk')
+    numsubgroup = metafunc.config.getoption('numsubgroup')
     objnames = metafunc.config.getoption('objnames')
+    cls = metafunc.cls
 
     metafunc.fixturenames.append('fnum')
     if len(hdf5files) != 0:
-        metafunc.cls.hdf5files_option = True
+        cls.hdf5files_option = True
     else:
-        metafunc.cls.hdf5files_option = False
+        cls.hdf5files_option = False
         numfiles = metafunc.config.getoption('numfiles')
         # test file names for _create_file
         hdf5files = [f"file{i}" for i in range(numfiles)]
 
-    metafunc.cls.hdf5file_names = hdf5files
-    metafunc.cls.disable_max_chunksize = disable_max_chunksize
-    metafunc.cls.objnames = [n.encode() for n in objnames]
-    metafunc.cls._testfilename = "_testfile"  # test file name for _testfile, only used if hdf5files_option is False
+    cls.hdf5file_names = hdf5files
+    cls.disable_max_chunksize = disable_max_chunksize
+    cls.numsubgroup = numsubgroup
+    cls.objnames = [n.encode() for n in objnames]
+    cls._testfilename = "_testfile"  # test file name for _testfile, only used if hdf5files_option is False
 
-    metafunc.parametrize(argnames='fnum', argvalues=range(len(hdf5files)+int(not metafunc.cls.hdf5files_option)),
-                         ids=[metafunc.cls._testfilename]*int(not metafunc.cls.hdf5files_option)+hdf5files, indirect=True)
-
+    cls.ids_testfilename=[cls._testfilename]*int(not cls.hdf5files_option)
+    cls.ids_hdf5files = hdf5files
+    ids = cls.ids_testfilename + cls.ids_hdf5files
+    cls.ids_subgroup = [i+'-subgroup' for i in ids]*numsubgroup
+    cls.num_maxchunksize = 2
+    cls.ids_maxchunksize = [i+'-maxchunksize' for i in ids]*int(not disable_max_chunksize)*cls.num_maxchunksize
+    ids += cls.ids_subgroup + cls.ids_maxchunksize
+    metafunc.parametrize(argnames='fnum', argvalues=range(len(ids)), ids=ids, indirect=True)
 
 def pytest_runtest_teardown(item, nextitem):
     if item.rep_setup.passed and item.rep_call.failed:
-        fnum = item.callspec.params['fnum']
+        fnum = item.callspec.params['fnum']//item.instance.num_files
         if not item.instance.fnum_keep[fnum]:
             copy(item.instance.hfile.filename, os.getcwd())
             item.instance.fnum_keep[fnum] = True
