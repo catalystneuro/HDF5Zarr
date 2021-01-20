@@ -191,7 +191,8 @@ class HDF5ZarrBase(object):
                         if self.hfile.name == '/':
                             assert_array_equal(hval_str, zval[dt_name])
                         else:
-                            assert_array_equal(np.frompyfunc(lambda x: x if x.startswith(self.hfile.name) else '', 1, 1)(hval_str), zval[dt_name])
+                            assert_array_equal(np.frompyfunc(lambda x: x if x.startswith(self.hfile.name)
+                                                                         else '', 1, 1)(hval_str), zval[dt_name])
                     else:
                         assert_array_equal(hval[dt_name], zval[dt_name])
         self._visit_item(_test_dset_val)
@@ -339,8 +340,12 @@ class HDF5ZarrBase(object):
         def _test_obj(name, hlink_info):
             nonlocal _ex
 
-            self.hobj = self.hfile[name]
-            self.zobj = self.zgroup[name.decode('utf-8')]
+            if not isinstance(self.hfile, h5py.Dataset):
+                self.hobj = self.hfile[name]
+                self.zobj = self.zgroup[name.decode('utf-8')]
+            else:
+                self.hobj = self.hfile[name]
+                self.zobj = self.zgroup
 
             hobj_info = h5py.h5g.get_objinfo(self.hobj.id)
 
@@ -358,7 +363,12 @@ class HDF5ZarrBase(object):
                 pass
 
         if self.objnames == []:
-            self.hfile.id.links.visit(_test_obj, info=True)
+            if not isinstance(self.hfile, h5py.Dataset):
+                self.hfile.id.links.visit(_test_obj, info=True)
+            else:
+                name = self.hfile.name
+                hlink_info = self.hfile.file.id.links.get_info(bytes(name, encoding='utf-8'))
+                _test_obj(name, hlink_info)
         else:
             for name in self.objnames:
                 hlink_info = self.hfile.id.links.get_info(name)
@@ -444,10 +454,13 @@ class TestHDF5Zarr(HDF5ZarrBase):
         cls.fnum_keep[0] = True
 
         group_names = []
-        def _get_groups(name, info):
-            nonlocal group_names
+        dset_names = []
+        def _get_objs(name, info):
+            nonlocal group_names, dset_names
             if info.type == h5py.h5o.TYPE_GROUP:
                 group_names.append(name.decode('utf-8'))
+            elif info.type == h5py.h5o.TYPE_DATASET:
+                dset_names.append(name.decode('utf-8'))
 
         if cls.numsubgroup != 0:
             # len(cls.ids_subgroup) == num_files*cls.numsubgroup
@@ -455,10 +468,15 @@ class TestHDF5Zarr(HDF5ZarrBase):
             cls.hdf5zarr_list += [None]*num_files*cls.numsubgroup
             for i in range(num_files, num_files*(1+cls.numsubgroup)):
                 group_names = []
-                h5py.h5o.visit(cls.file_list[i].id, _get_groups, info=True)
+                dset_names = []
+                h5py.h5o.visit(cls.file_list[i].id, _get_objs, info=True)
                 group_names.sort()
-                if len(group_names) != 0:
-                    hdf5group = group_names[(i-num_files)//num_files if len(group_names) > (i-num_files)//num_files else -1]  # select next group in sorted group names
+                dset_names.sort()
+                obj_names = [_objname for _objname in itertools.chain(*itertools.zip_longest(group_names, dset_names))
+                             if _objname is not None]  # interleave groups and dsets
+                if len(obj_names) != 0:
+                    # select next group in sorted group names
+                    hdf5group = obj_names[(i-num_files)//num_files if len(obj_names) > (i-num_files)//num_files else -1]
                 else:
                     hdf5group = None
                 cls.hdf5zarr_list[i] = HDF5Zarr(cls.file_list[i].filename, hdf5group=hdf5group)

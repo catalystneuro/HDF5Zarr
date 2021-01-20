@@ -27,8 +27,8 @@ def pytest_addoption(parser):
         "--numsubgroup",
         action="store",
         type=int,
-        default=3,
-        help="number of runs testing hdf5group argument",
+        default=4,
+        help="number of runs testing hdf5group/hdf5obj argument",
     )
     parser.addoption(
         "--fkeep",
