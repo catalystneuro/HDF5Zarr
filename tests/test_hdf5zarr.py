@@ -344,7 +344,7 @@ class HDF5ZarrBase(object):
                 self.hobj = self.hfile[name]
                 self.zobj = self.zgroup[name.decode('utf-8')]
             else:
-                self.hobj = self.hfile[name]
+                self.hobj = self.hfile
                 self.zobj = self.zgroup
 
             hobj_info = h5py.h5g.get_objinfo(self.hobj.id)
@@ -487,9 +487,11 @@ class TestHDF5Zarr(HDF5ZarrBase):
             cls.file_list += cls.file_list[:num_files]*2
             cls.hdf5zarr_list += [None]*num_files*2
             for i in range(len(cls.file_list)-2*num_files, len(cls.file_list)-num_files):
-                cls.hdf5zarr_list[i] = HDF5Zarr(cls.file_list[i].filename, max_chunksize=1000)
+                max_chunksize = 1000 if not cls.hdf5files_option else 2**cls.srand.randint(14, 20)
+                cls.hdf5zarr_list[i] = HDF5Zarr(cls.file_list[i].filename, max_chunksize=max_chunksize)
             for i in range(len(cls.file_list)-num_files, len(cls.file_list)):
-                cls.hdf5zarr_list[i] = HDF5Zarr(cls.file_list[i].filename, max_chunksize=2**cls.srand.randint(10, 20))
+                max_chunksize = 2**cls.srand.randint(10, 20) if not cls.hdf5files_option else 2**cls.srand.randint(14, 20)
+                cls.hdf5zarr_list[i] = HDF5Zarr(cls.file_list[i].filename, max_chunksize=max_chunksize)
 
     @classmethod
     def teardown_class(cls):
