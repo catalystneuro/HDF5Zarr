@@ -3,7 +3,7 @@ import numpy as np
 import tempfile
 import secrets
 import h5py
-from hdf5zarr import HDF5Zarr
+from hdf5zarr import HDF5Zarr, open_as_zarr
 import pytest
 import itertools
 
@@ -13,6 +13,12 @@ class HDF5ZarrBase(object):
     ##########################################
     #  basic tests                           #
     ##########################################
+
+    @pytest.mark.parametrize('visit_type', [None], ids=[""])
+    def test_open_as_zarr(self):
+        zgroup = open_as_zarr(self.hfile)
+        assert zgroup.store == self.zgroup.store
+        assert zgroup == self.zgroup
 
     @pytest.mark.parametrize('visit_type', [None], ids=[""])
     def test_consolidate_metadata(self):
