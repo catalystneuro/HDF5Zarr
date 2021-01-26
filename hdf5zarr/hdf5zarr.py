@@ -117,16 +117,12 @@ def open_as_zarr(filename, **kwargs):
     Args:
         filename:                str, h5py dataset, group or file, or File-like object to be read by zarr
         collectattrs:            bool, whether to collect attributes or not, default True
+        collectrefs:             bool or list, passing a dataset with object reference dtype without setting collectrefs
+                                 will dereference dataset to null when read with zarr.
+                                 set to a list of absolute paths in hdf5 file that the dataset may refers to,
+                                 set to True to collect all references for all objects in the hdf5 file.
         **kwargs:                keyword arguments passed to HDF5Zarr
     """
-
-    if isinstance(filename, h5py.Dataset) or (isinstance(filename, h5py.Group) and filename.name != '/'):
-        # check keyword arguments
-        hdf5obj = kwargs.get('hdf5obj') or kwargs.get('hdf5group')  # hdf5obj overrides hdf5group in HDF5Zarr
-        if hdf5obj and hdf5obj != filename.name:
-            raise Exception(f"hdf5obj or hdf5group is specified, but it is different from {filename} with name {filename.name}, ambiguous arguments")
-        kwargs['hdf5obj'] = filename.name
-        filename = filename.file
 
     hdf5zarr = HDF5Zarr(filename, **kwargs)
     zgroup = hdf5zarr.zgroup
@@ -143,18 +139,10 @@ def export_to_zarr(filename, zarrstore: Union[MutableMapping, str, Path], **kwar
         **kwargs:                keyword arguments passed to HDF5Zarr
     """
 
-    if isinstance(filename, h5py.Dataset) or (isinstance(filename, h5py.Group) and filename.name != '/'):
-        # check keyword arguments
-        hdf5obj = kwargs.get('hdf5obj') or kwargs.get('hdf5group')  # hdf5obj overrides hdf5group in HDF5Zarr
-        if hdf5obj and hdf5obj != filename.name:
-            raise Exception(f"hdf5obj or hdf5group is specified, but it is different from {filename} with name {filename.name}, ambiguous arguments")
-        kwargs['hdf5obj'] = filename.name
-        filename = filename.file
-
     hdf5zarr = HDF5Zarr(filename, **kwargs)
     zgroup = hdf5zarr.zgroup
     zout = zarr.open_group(zarrstore, mode='a')
-    zarr.copy(zgroup, zout, name='/', log=stdout, **args)
+    zarr.copy(zgroup, zout, name='/', log=stdout)
 
 
 class HDF5Zarr(object):
@@ -164,16 +152,21 @@ class HDF5Zarr(object):
                  collectattrs: bool = True, uri: str = None, hdf5group: str = None,
                  store: Union[MutableMapping, str, Path] = None, store_path: str = None,
                  store_mode: str = 'a', LRU: bool = False, LRU_max_size: int = 2**30,
-                 max_chunksize=2*2**20, driver: str = None, blocksize: int = 2**14):
+                 max_chunksize=2*2**20, driver: str = None, blocksize: int = 2**14, collectrefs: Union[bool, str, list] = None):
 
         """
         Args:
-            filename:                    str, File-like or h5py.File object to be read by zarr
+            filename:                    str, File-like, h5py file, group or dataset object to be read by zarr
             hdf5group:                   str, hdf5 group in hdf5 file to be read by zarr
                                          along with its children. default is the root group.
             hdf5obj:                     same as hdf5group for accepting either dataset or group,
                                          overrides hdf5group
             collectattrs:                bool, whether to collect attributes or not, default True
+            collectrefs:                 affects only if filename is not an h5py.File,
+                                         or if hdf5obj points to a dataset or group
+                                         bool or list, whether to collect object references
+                                         set to True to collect all references
+                                         set to list of paths to only collect references for objects in the list
             uri:                         set uri in zarr store,
                                          overrides determining uri from filename
             store:                       collections.abc.MutableMapping or str, zarr store.
@@ -214,6 +207,10 @@ class HDF5Zarr(object):
         if not isinstance(collectattrs, bool):
             raise TypeError(f"Expected bool for collectattrs, recieved {type(collectattrs)}")
         self.collectattrs = collectattrs
+        if collectrefs is not None and (not isinstance(collectrefs, (bool, str, list)) or
+                isinstance(collectrefs, list) and any(not isinstance(i, str) for i in collectrefs)):
+            raise TypeError(f"Expected bool, str or list of strings for collectrefs, recieved {type(collectrefs)}")
+        self.collectrefs = collectrefs
         if uri is not None and not isinstance(uri, str):
             raise TypeError(f"Expected str for uri, recieved {type(uri)}")
         self.uri = uri
@@ -244,6 +241,25 @@ class HDF5Zarr(object):
             if not isinstance(hdf5obj, str):
                 raise TypeError(f"Expected str for hdf5obj, recieved {type(hdf5obj)}")
             hdf5group = hdf5obj
+
+        h5group = False
+        if isinstance(filename, (h5py.File, h5py.Group, h5py.Dataset)):
+            if not isinstance(filename, h5py.File) and not (isinstance(filename, h5py.Group) and filename.name == '/'):
+                # check keyword arguments
+                if hdf5group and hdf5group != filename.name:
+                    raise Exception(f"hdf5obj or hdf5group is specified, but it is \
+                                     different from {filename} with name {filename.name}, ambiguous arguments")
+                hdf5group = filename.name
+                self.group = filename
+                h5group = True
+            self.file = filename.file
+            filename = filename.file.filename
+            h5filename = True
+            if driver is not None:
+                warn(f"driver {driver} has no effect. filename is an h5py.File")
+        else:
+            h5filename = False
+
         if hdf5group is not None and store_path is None:
             self.store_path = hdf5group  # store_path is passed to zarr
         else:
@@ -252,28 +268,20 @@ class HDF5Zarr(object):
         if self.store is None:
             self.store = self.zgroup.store
 
-        if isinstance(filename, h5py.File) or (isinstance(filename, h5py.Group) and filename.name == '/'):
-            self.file = filename
-            filename = filename.filename
-            h5filename = True
-            if driver is not None:
-                warn(f"driver {driver} has no effect. filename is an h5py.File")
-        else:
-            h5filename = False
-
         # FileChunkStore requires uri
-        if self.uri is None and isinstance(filename, str):
-            self.uri = filename
-        else:
-            try:
-                self.uri = getattr(filename, 'path', None)
-                if self.uri is None:
-                    self.uri = filename.name
-                if self.uri in (None, b'') or len(str(self.uri)) == 0:
-                    raise Exception
-            except Exception:
-                warn('unable to determine uri. uri argument is not passed')
-                self.uri = str(filename)
+        if self.uri is None:
+            if isinstance(filename, str):
+                self.uri = filename
+            else:
+                try:
+                    self.uri = getattr(filename, 'path', None)
+                    if self.uri is None:
+                        self.uri = filename.name
+                    if self.uri in (None, b'') or len(str(self.uri)) == 0:
+                        raise Exception
+                except Exception:
+                    warn('unable to determine uri. uri argument is not passed')
+                    self.uri = str(filename)
 
         # Access hdf5 file and create zarr hierarchy
         self.hdf5group = hdf5group
@@ -281,7 +289,7 @@ class HDF5Zarr(object):
         if driver is None and not h5filename and (self.filename, str):
             # checks filename file system with fsspec
             try:
-                fs, _, _ = ffspec.get_fs_token_paths(self.filename)
+                fs, _, _ = fsspec.get_fs_token_paths(self.filename)
                 if not isinstance(fs, fsspec.implementations.local.LocalFileSystem):
                     cache_type = 'mmap'  # TO DO
                     self.filename = fs.open(self.filename, mode='rb', cache_type=cache_type, block_size=self.blocksize)
@@ -291,7 +299,8 @@ class HDF5Zarr(object):
         if self.store_mode != 'r':
             if not h5filename:
                 self.file = h5py.File(self.filename, mode='r', driver=driver)
-            self.group = self.file[self.hdf5group] if self.hdf5group is not None else self.file
+            if not h5group:
+                self.group = self.file[self.hdf5group] if self.hdf5group is not None else self.file
             self.create_zarr_hierarchy(self.group, self.zgroup)
             if not h5filename:
                 self.file.close()
@@ -731,12 +740,21 @@ class HDF5Zarr(object):
                 self.copy_attrs_data_to_zarr_store(self.group, self.zgroup)
         else:
             link_info = self.file.id.links.get_info(bytes(self.group.name, encoding='utf-8'))
-            # TO DO, Soft Links #
+
             if link_info.type == h5py.h5l.TYPE_EXTERNAL:
-                raise Exception(f"Dataset {obj.name} is an External Link")
+                raise Exception(f"Dataset {self.group.name} is an External Link")
 
             if link_info.type == h5py.h5l.TYPE_SOFT:
-                warn(f"Dataset {obj.name} is a Soft Link")
+                warn(f"Dataset {self.group.name} is a Soft Link")
+
+            if self.collectrefs and (link_info.u not in self._address_dict):
+                if link_info.type == h5py.h5l.TYPE_SOFT:
+                    targetpath = self.get_name(self.file, self.group.name)
+                    self._address_dict[link_info.u] = targetpath
+                else:  # hard link
+                    self._address_dict[link_info.u] = self.group.name
+            elif h5py_group.dtype.hasobject and not self.collectrefs:
+                warn("Dataset with Object Reference dtypes will dereference to null without collectrefs argument")
 
             groupname = self.group.parent.name  # dataset parent name is passed to zarr as path
             if groupname in self.zgroup:
@@ -747,6 +765,35 @@ class HDF5Zarr(object):
             self.zgroup = dsetparent[h5py_group.name]
             if self.collectattrs:
                 self.copy_attrs_data_to_zarr_store(h5py_group, self.zgroup)
+
+        # collect references only if not all are already in self._address_dict
+        if self.collectrefs and h5py_group.name != '/':
+            if self.collectrefs is True:
+                def _get_address(name, info):
+                    obj = self.file[name]
+                    self._address_dict[info.addr] = obj.name
+
+                # add object addresses in file to self._address_dict
+                self._address_dict[h5py.h5o.get_info(self.file.id).addr] = self.file.name
+                h5py.h5o.visit(self.file.id, _get_address, obj_name=bytes(self.file.name, encoding='utf-8'), info=True)
+            else:
+                self.collectrefs = self.collectrefs if not isinstance(self.collectrefs, str) else [self.collectrefs]
+                for name in self.collectrefs:
+                    name = str("/"/PurePosixPath(name))  # get absolute name
+                    if name in self._address_dict.values():
+                        continue
+                    link_info = self.file.id.links.get_info(bytes(name, encoding='utf-8'))
+                    if link_info.type == h5py.h5l.TYPE_EXTERNAL:
+                        warn(f"Skipped {name} in collectrefs, External Link")
+                        continue
+                    if link_info.type == h5py.h5l.TYPE_SOFT:
+                        try:
+                            name = self.get_name(self.file, name)
+                            self._address_dict[link_info.u] = name
+                        except:
+                            warn(f"Skipped {name} in collectrefs, Soft Link. target address not found")
+                    else:  # hard link
+                        self._address_dict[link_info.u] = name
 
         FileChunkStore.obj_address_info(self.store, self._address_dict)
 
