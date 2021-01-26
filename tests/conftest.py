@@ -1,6 +1,7 @@
 import pytest
 import os
 from shutil import copy
+from test_hdf5zarr import HDF5ZarrBase
 
 
 def pytest_addoption(parser):
@@ -31,6 +32,13 @@ def pytest_addoption(parser):
         help="number of runs testing hdf5group/hdf5obj argument",
     )
     parser.addoption(
+        "--numdataset",
+        action="store",
+        type=int,
+        default=1,
+        help="number of runs testing h5py.Dataset as filename argument",
+    )
+    parser.addoption(
         "--fkeep",
         action="store_true",
         help="flag to indicate collecting failed objects",
@@ -59,10 +67,10 @@ def pytest_generate_tests(metafunc):
     hdf5files = metafunc.config.getoption('hdf5files')
     disable_max_chunksize = metafunc.config.getoption('disablemaxchunk')
     numsubgroup = metafunc.config.getoption('numsubgroup')
+    numdset = metafunc.config.getoption('numdataset')
     objnames = metafunc.config.getoption('objnames')
     cls = metafunc.cls
 
-    metafunc.fixturenames.append('fnum')
     if len(hdf5files) != 0:
         cls.hdf5files_option = True
     else:
@@ -74,17 +82,25 @@ def pytest_generate_tests(metafunc):
     cls.hdf5file_names = hdf5files
     cls.disable_max_chunksize = disable_max_chunksize
     cls.numsubgroup = numsubgroup
+    cls.numdset = numdset
     cls.objnames = [n.encode() for n in objnames]
     cls._testfilename = "_testfile"  # test file name for _testfile, only used if hdf5files_option is False
 
-    cls.ids_testfilename=[cls._testfilename]*int(not cls.hdf5files_option)
+    cls.ids_testfilename = [cls._testfilename]*int(not cls.hdf5files_option)
     cls.ids_hdf5files = hdf5files
     ids = cls.ids_testfilename + cls.ids_hdf5files
     cls.ids_subgroup = [i+'-subgroup' for i in ids]*numsubgroup
+    cls.ids_dset = [i+'-dataset' for i in ids]*numdset
+    ids += cls.ids_subgroup + cls.ids_dset
     cls.num_maxchunksize = 2
     cls.ids_maxchunksize = [i+'-maxchunksize' for i in ids]*int(not disable_max_chunksize)*cls.num_maxchunksize
-    ids += cls.ids_subgroup + cls.ids_maxchunksize
-    metafunc.parametrize(argnames='fnum', argvalues=range(len(ids)), ids=ids, indirect=True)
+    ids += cls.ids_maxchunksize
+    metafunc.module.confargs = (cls.hdf5files_option, cls.hdf5file_names, cls.ids_subgroup,
+                                cls.ids_dset, cls.ids_maxchunksize, cls._testfilename)
+    if metafunc.definition.nodeid.rfind('TestHDF5Zarr') > 0:
+        metafunc.fixturenames.append('fnum')
+        metafunc.parametrize(argnames='fnum', argvalues=range(len(ids)), ids=ids, indirect=True)
+
 
 def pytest_runtest_teardown(item, nextitem):
     if item.rep_setup.passed and item.rep_call.failed:
@@ -94,3 +110,15 @@ def pytest_runtest_teardown(item, nextitem):
             item.instance.fnum_keep[fnum] = True
 
     item.session._setupstate.teardown_exact(item, nextitem)
+
+
+@pytest.fixture(scope="session")
+def filesbase(request):
+    args = request.session.items[0].module.confargs
+    if all([item.name.rfind('open_as_zarr_dset') > 0 for item in request.session.items]):
+        # for open_as_zarr_dset disable subgroups, subdataset and max_chunksize options
+        hdf5files_option, hdf5file_names, _, _, _, _testfilename = *args,
+        base = HDF5ZarrBase(hdf5files_option, hdf5file_names, [], [], [], _testfilename)
+    else:
+        base = HDF5ZarrBase(*args)
+    return base
