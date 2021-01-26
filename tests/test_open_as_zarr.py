@@ -3,6 +3,7 @@ import numpy as np
 import h5py
 from hdf5zarr import open_as_zarr
 import pytest
+import fsspec
 
 
 class Test_open_as_zarr_dset(object):
@@ -116,3 +117,30 @@ class Test_open_as_zarr_dset(object):
             # simple fillvalue
             else:
                 assert_array_equal(dset.fillvalue, zarray.fill_value)
+
+    def test_open_as_zarr_remote(self, request, capsys):
+        # remote test with ros3 and open_as_zarr
+        item = 'https://dandiarchive.s3.amazonaws.com/girder-assetstore/4f/5a/4f5a24f7608041e495c85329dba318b7'
+        dsetname = '/acquisition/raw_running_wheel_rotation/data'
+        if 'ros3' in h5py.registered_drivers():
+            hfile = h5py.File(item, mode='r', driver='ros3')
+        else:
+            f = fsspec.open(item, 'rb')
+            hfile = h5py.File(f.open(), mode='r')
+
+        dset = hfile[dsetname]
+
+        with capsys.disabled():
+            print("\n"+f"{item}  :".rjust(len(request.node.nodeid)), end='')
+            print("\n"+f"dataset: {dsetname}, data  :".rjust(len(request.node.nodeid)), end='')
+
+        zarray = open_as_zarr(dset)  # dataset does not have object references
+
+        # test simple dtype
+        assert_array_equal(dset, zarray)
+
+        with capsys.disabled():
+            print("\n"+f"dataset: {dset.name}, fillvalue  :".rjust(len(request.node.nodeid)), end='')
+
+        # test simple fillvalue
+        assert_array_equal(dset.fillvalue, zarray.fill_value)
