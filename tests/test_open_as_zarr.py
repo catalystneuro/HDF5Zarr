@@ -4,6 +4,7 @@ import h5py
 from hdf5zarr import open_as_zarr
 import pytest
 import fsspec
+import zarr
 
 
 class Test_open_as_zarr_dset(object):
@@ -135,6 +136,7 @@ class Test_open_as_zarr_dset(object):
             print("\n"+f"dataset: {dsetname}, data  :".rjust(len(request.node.nodeid)), end='')
 
         zarray = open_as_zarr(dset)  # dataset does not have object references
+        assert isinstance(zarray, zarr.Array)
 
         # test simple dtype
         assert_array_equal(dset, zarray)
