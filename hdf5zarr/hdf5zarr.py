@@ -16,6 +16,7 @@ from xdrlib import Unpacker
 import struct
 from sys import stdout
 from warnings import warn
+from fsspec.implementations import local
 SYMLINK = '.link'
 
 
@@ -152,7 +153,7 @@ class HDF5Zarr(object):
                  collectattrs: bool = True, uri: str = None, hdf5group: str = None,
                  store: Union[MutableMapping, str, Path] = None, store_path: str = None,
                  store_mode: str = 'a', LRU: bool = False, LRU_max_size: int = 2**30,
-                 max_chunksize=2*2**20, driver: str = None, blocksize: int = 2**14, collectrefs: Union[bool, str, list] = None):
+                 max_chunksize=2*2**20, driver: str = None, blocksize: int = 2**15, collectrefs: Union[bool, str, list] = None):
 
         """
         Args:
@@ -286,11 +287,11 @@ class HDF5Zarr(object):
         # Access hdf5 file and create zarr hierarchy
         self.hdf5group = hdf5group
         self.filename = filename
-        if driver is None and not h5filename and (self.filename, str):
+        if driver is None and not h5filename and isinstance(self.filename, str):
             # checks filename file system with fsspec
             try:
                 fs, _, _ = fsspec.get_fs_token_paths(self.filename)
-                if not isinstance(fs, fsspec.implementations.local.LocalFileSystem):
+                if not isinstance(fs, local.LocalFileSystem):
                     cache_type = 'mmap'  # TO DO
                     self.filename = fs.open(self.filename, mode='rb', cache_type=cache_type, block_size=self.blocksize)
             except:
