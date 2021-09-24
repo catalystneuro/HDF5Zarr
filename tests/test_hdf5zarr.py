@@ -462,13 +462,15 @@ class HDF5ZarrBase(object):
         if cls.hdf5files_option:
             cls.file_list = [h5py.File(i, 'r') for i in cls.hdf5file_names]
         else:
-            cls.file_list = [cls._create_file(i) for i in cls.hdf5file_names]
+            cls.hdf5file_names = [cls._create_file(i) for i in cls.hdf5file_names]
+            cls.file_list = [h5py.File(i, 'r') for i in cls.hdf5file_names]
 
         cls.hdf5zarr_list = [HDF5Zarr(f.filename, max_chunksize=None) for f in cls.file_list]
 
         # prepend _testfile if hdf5files are not specified
         if not cls.hdf5files_option:
-            cls.file_list.insert(0, cls._testfile())
+            cls.hdf5file_names.insert(0, cls._testfile())
+            cls.file_list.insert(0, h5py.File(cls.hdf5file_names[0], 'r'))
             cls.hdf5zarr_list.insert(0, HDF5Zarr(cls.file_list[0].filename, max_chunksize=None))
 
         # track which temporary files are already saved.
@@ -785,7 +787,7 @@ class HDF5ZarrBase(object):
                     # fletcher32 = None
                     # scaleoffset = None
                 fillvalue = None if (next(iter_fillvalue) is None or
-                                     data.dtype.char == 'M') else data.reshape(size)[rand_rng.integers(0, size)]
+                                     data.dtype.char in ('M','V')) else data.reshape(size)[rand_rng.integers(0, size)]
 
                 dset = g.create_dataset(
                            name='dsetstructarraywobjref'+str(i),
@@ -839,7 +841,10 @@ class HDF5ZarrBase(object):
                     attr = np.frombuffer(rand_rng.bytes(size*np.dtype(dtype).itemsize), dtype=dtype)
                 obj.attrs[attr_name] = attr
 
-        return hfile
+        filename = hfile.filename
+        hfile.flush()
+        hfile.close()
+        return filename
 
     def _testfile(cls):
         """ create test hdf5 file """
@@ -887,4 +892,7 @@ class HDF5ZarrBase(object):
             fillvalue=None,
             )
 
-        return hfile
+        filename = hfile.filename
+        hfile.flush()
+        hfile.close()
+        return filename

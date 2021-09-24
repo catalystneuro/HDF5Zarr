@@ -236,39 +236,40 @@ class HDF5Zarr(object):
         # create zarr format hierarchy for datasets and attributes compatible with hdf5 file,
         # dataset contents are not copied, unless it contains variable-length strings
 
-        if hdf5group is not None and not isinstance(hdf5group, str):
-            raise TypeError(f"Expected str for hdf5group, recieved {type(hdf5group)}")
+        if hdf5group is not None and (not isinstance(hdf5group, str) or len(hdf5group) == 0):
+            raise TypeError(f"Expected non-empty str for hdf5group, recieved: {hdf5group}, {type(hdf5group)}")
         if hdf5obj is not None:
-            if not isinstance(hdf5obj, str):
-                raise TypeError(f"Expected str for hdf5obj, recieved {type(hdf5obj)}")
+            if not isinstance(hdf5obj, str) or len(hdf5obj) == 0:
+                raise TypeError(f"Expected non-empty str for hdf5obj, recieved: {hdf5obj}, {type(hdf5obj)}")
             hdf5group = hdf5obj
 
-        h5group = False
+        h5group_filename = False # indicates if filename passed is an h5py group object
+        h5obj_filename = False # indicates if filename passed is an h5py object
         if isinstance(filename, (h5py.File, h5py.Group, h5py.Dataset)):
             if not isinstance(filename, h5py.File) and not (isinstance(filename, h5py.Group) and filename.name == '/'):
                 # check keyword arguments
-                if hdf5group and hdf5group != filename.name:
-                    raise Exception(f"hdf5obj or hdf5group is specified, but it is \
-                                     different from {filename} with name {filename.name}, ambiguous arguments")
+                if hdf5group and '/'+normalize_storage_path(hdf5group) != filename.name:
+                    raise Exception(f'hdf5obj or hdf5group is specified, but it is '+
+                                    f'different from {filename} with name {filename.name}, ambiguous arguments')
                 hdf5group = filename.name
                 self.group = filename
-                h5group = True
+                h5group_filename = True
             self.file = filename.file
             filename = filename.file.filename
-            h5filename = True
+            h5obj_filename = True
             if driver is not None:
                 warn(f"driver {driver} has no effect. filename is an h5py.File")
-        else:
-            h5filename = False
 
         if hdf5group is not None and store_path is None:
             self.store_path = hdf5group  # store_path is passed to zarr
         else:
             self.store_path = store_path
+
         self.zgroup = zarr.open(self.store, mode=self.store_mode, path=self.store_path)
         if self.store is None:
             self.store = self.zgroup.store
 
+        self.zgroup = zarr.open(self.store, mode=self.store_mode)
         # FileChunkStore requires uri
         if self.uri is None:
             if isinstance(filename, str):
@@ -287,7 +288,7 @@ class HDF5Zarr(object):
         # Access hdf5 file and create zarr hierarchy
         self.hdf5group = hdf5group
         self.filename = filename
-        if driver is None and not h5filename and isinstance(self.filename, str):
+        if driver is None and not h5obj_filename and isinstance(self.filename, str):
             # checks filename file system with fsspec
             try:
                 fs, _, _ = fsspec.get_fs_token_paths(self.filename)
@@ -298,12 +299,28 @@ class HDF5Zarr(object):
                 pass
 
         if self.store_mode != 'r':
-            if not h5filename:
-                self.file = h5py.File(self.filename, mode='r', driver=driver)
-            if not h5group:
+            if not h5obj_filename:
+                # set self.file to h5py.File object
+                if driver is None and not isinstance(self.filename, str):
+                    #  checking for valid cache object in self.filename
+                    _cached = False
+                    try:
+                        _cache = self.filename.cache
+                        if isinstance(_cache, fsspec.caching.BaseCache):
+                            _cached = True
+                    except:
+                        pass
+
+                    self.file = h5py.File(self.filename, mode='r')
+                    if _cached:
+                        self.filename.cache = _cache
+                else:
+                    self.file = h5py.File(self.filename, mode='r', driver=driver)
+
+            if not h5obj_filename:
                 self.group = self.file[self.hdf5group] if self.hdf5group is not None else self.file
             self.create_zarr_hierarchy(self.group, self.zgroup)
-            if not h5filename:
+            if not h5obj_filename:
                 self.file.close()
         if isinstance(self.filename, str):
             self.chunkstore_file = fsspec.open(self.filename, mode='rb')
@@ -894,13 +911,14 @@ class HDF5Zarr(object):
                 dset_fillvalue = None
 
             dtype_ = np.dtype(dtype_)
-
+            object_codec = VLenHDF5String()
             zarray = zgroup.create_dataset(dset.name, shape=dset.shape,
                                            dtype=dtype_,
                                            chunks=dset.chunks or False,
                                            fill_value=dset_fillvalue,
                                            compression=compression,
-                                           overwrite=True)
+                                           overwrite=True,
+                                           object_codec=object_codec)
 
             dtype_refs = [(dset.dtype.names[i],
                            "Object Reference" if dset_type.get_member_class(i) == h5py.h5t.REFERENCE else dset.dtype[i].str)
@@ -961,7 +979,7 @@ class HDF5Zarr(object):
                     np.prod(dset.shape) != 0 and (dset.chunks is None or dset.chunks == dset.shape)):
 
                 dset_chunks = dset.chunks if dset.chunks else dset.shape
-                if dset.shape != () and dset.size != 0:
+                if dset.shape != () and np.prod(dset.shape) != 0:
                     dset_chunks = list(dset_chunks)
                     dim_ = 0
                     ratio_ = self.max_chunksize/(np.prod(dset_chunks)*dset.dtype.itemsize)
