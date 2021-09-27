@@ -896,3 +896,76 @@ class HDF5ZarrBase(object):
         hfile.flush()
         hfile.close()
         return filename
+
+
+### individual tests ###
+@pytest.fixture(autouse=True)
+def _gethfile(prefix: str = None):
+    """ create test hdf5 file
+        prefix: string, temporary file name prefix
+    """
+
+    # repeatable test
+    # create hdf5 file
+    temp_file = tempfile.NamedTemporaryFile(suffix=".hdf5", prefix=prefix, delete=True)
+    temp_file.close()
+    hfile = h5py.File(temp_file.name, 'w')
+    filename = hfile.filename
+    yield hfile
+    hfile.close()
+
+
+def test_maxchunksize(_gethfile):
+    hfile =_gethfile
+
+    shape = (10,20,30,40)
+    chunks = shape
+    data = np.random.randint(0, 10, size=shape, dtype=np.uint8)
+    dsetname = 'dset0'
+    hfile.create_dataset(
+        name=dsetname,
+        shape=shape,
+        data=data,
+        chunks=chunks,
+        )
+    hfile.flush()
+    hdf5zarr = HDF5Zarr(hfile, hdf5obj=dsetname, max_chunksize=None)
+    zgroup = hdf5zarr.consolidate_metadata()
+    assert_array_equal(zgroup[()],hfile[dsetname][()])
+
+    max_chunksize = 2**10
+    hdf5zarr = HDF5Zarr(hfile, hdf5obj=dsetname, max_chunksize=max_chunksize)
+    zgroup = hdf5zarr.consolidate_metadata()
+    print(zgroup.chunks)
+    assert_array_equal(zgroup[()],hfile[dsetname][()])
+
+def test_maxchunksize_partial(_gethfile):
+    " where not all chunks are written"
+    hfile =_gethfile
+
+    shape = (10,20,30,40)
+    chunks = (2,4,6,8)
+    dsetname = 'dset0'
+    hfile.create_dataset(
+        name=dsetname,
+        shape=shape,
+        chunks=chunks,
+        )
+    # write to a few chunks
+    dset = hfile[dsetname]
+    dshape = (2,8,7,40)
+    data = np.random.randint(0, 10, size=dshape, dtype=np.uint8)
+    dset[3:5,0:8,20:27,:]=data
+    dshape = (1,20,3,5)
+    data = np.random.randint(0, 10, size=dshape, dtype=np.uint8)
+    dset[8:9,:,7:10,1:6]=data
+    hfile.flush()
+    hdf5zarr = HDF5Zarr(hfile, hdf5obj=dsetname, max_chunksize=None)
+    zgroup = hdf5zarr.consolidate_metadata()
+    assert_array_equal(zgroup[()],hfile[dsetname][()])
+
+    max_chunksize = 2**10
+    hdf5zarr = HDF5Zarr(hfile, hdf5obj=dsetname, max_chunksize=max_chunksize)
+    zgroup = hdf5zarr.consolidate_metadata()
+    print(zgroup.chunks)
+    assert_array_equal(zgroup[()],hfile[dsetname][()])

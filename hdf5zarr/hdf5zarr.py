@@ -252,8 +252,8 @@ class HDF5Zarr(object):
                     raise Exception(f'hdf5obj or hdf5group is specified, but it is '+
                                     f'different from {filename} with name {filename.name}, ambiguous arguments')
                 hdf5group = filename.name
-                self.group = filename
                 h5group_filename = True
+            self.group = filename
             self.file = filename.file
             filename = filename.file.filename
             h5obj_filename = True
@@ -291,10 +291,14 @@ class HDF5Zarr(object):
         if driver is None and not h5obj_filename and isinstance(self.filename, str):
             # checks filename file system with fsspec
             try:
-                fs, _, _ = fsspec.get_fs_token_paths(self.filename)
                 if not isinstance(fs, local.LocalFileSystem):
+                    fs, _, _ = fsspec.get_fs_token_paths(self.filename)
+                    tempfilename = re.sub(r'[^\w]', '', filename)
+                    temp_file = tempfile.NamedTemporaryFile(suffix="", prefix='temp_'+tempfilename)
+                    temp_file_name = temp_file.name
+                    temp_file.close()
                     cache_type = 'mmap'  # TO DO
-                    self.filename = fs.open(self.filename, mode='rb', cache_type=cache_type, block_size=self.blocksize)
+                    self.filename = fs.open(self.filename, mode='rb', cache_type=cache_type, block_size=self.blocksize, cache_options={'location':temp_file_name})
             except:
                 pass
 
@@ -485,13 +489,13 @@ class HDF5Zarr(object):
             except Exception:
                 print(f"Attribute value of type {type(val)} is not processed: Attribute {key} of object {h5obj.name}")
 
-    def storage_info(self, dset, dset_chunks):
+    def storage_info(self, dset, dset_chunks, _chunks):
         if dset.shape is None:
             # Null dataset
             return dict()
 
         dsid = dset.id
-        if dset.chunks is None:
+        if _chunks is None:
             # get offset for Non-External datasets
             if dsid.get_offset() is None:
                 return dict()
@@ -517,74 +521,69 @@ class HDF5Zarr(object):
                     return stinfo
 
         else:
-            # TO DO # assume space_status is allocated
-            space_status = h5py.h5d.SPACE_STATUS_ALLOCATED
+            chunk_maxind = np.ceil([a / b for a, b in zip(dsid.shape, _chunks)]).astype(int)
+            stinfo = HDF5Zarr._get_storage_info_chunked(dset_chunks, _chunks, dsid=dsid, chunk_maxind=chunk_maxind)
+            return stinfo
 
-            stinfo = dict()
-            chunk_size = dset.chunks
-            if space_status == h5py.h5d.SPACE_STATUS_ALLOCATED:
-                chunk_maxind = np.ceil([a / b for a, b in zip(dset.shape, chunk_size)]).astype(int)
+    def _get_storage_info_chunked(dset_chunks, _chunks, dsid=None, chunk_maxind=None, chunk_indices=None):
+
+        space_status = h5py.h5d.SPACE_STATUS_ALLOCATED
+        stinfo = dict()
+
+        # TO DO #
+        if space_status == h5py.h5d.SPACE_STATUS_ALLOCATED:
+            if chunk_indices is None:
                 chunk_indices = np.indices(chunk_maxind)\
                                   .transpose(*range(1, len(chunk_maxind)+1), 0)\
                                   .reshape(np.prod(chunk_maxind), len(chunk_maxind))
                 chunk_indices = [tuple(c) for c in chunk_indices]
 
-                _get_chunk_info_by_coord = dsid.get_chunk_info_by_coord
-                if dset_chunks == chunk_size:
-                    for key in chunk_indices:
-                        blob = _get_chunk_info_by_coord(tuple(np.array(key)*chunk_size))
-                        if blob.size != 0:  # blob.size == 0 when not allocated
-                            stinfo[key] = {'offset': blob.byte_offset,
-                                           'size': blob.size}
+            _indices_chunks = [sum([i[k]*np.prod(chunk_maxind[k+1:]) for k in range(len(chunk_maxind)-1)])+i[-1] for i in chunk_indices]
+            for index in _indices_chunks:
+                blob = dsid.get_chunk_info(index)
+                bytes_offset = blob.byte_offset
+                blob_size = blob.size
+                if blob_size is not None and bytes_offset is not None and blob_size>0 and bytes_offset >=0:  # blob.size == 0 when not allocated
+                    key = tuple([a // b for a, b in zip(blob.chunk_offset, dset_chunks)])
+
+
+                    offsets_, sizes_, chunk_indices = HDF5Zarr._get_chunkstorage_info(dsid, bytes_offset, _chunks,
+                                                                                  blob_size, dset_chunks, key)
+
+                    for i in range(len(chunk_indices)):
+                        stinfo[(*chunk_indices[i], )] = {'offset': offsets_[i],
+                                                         'size': sizes_[i]}
                 else:
-                    for key in chunk_indices:
-                        blob = _get_chunk_info_by_coord(tuple(np.array(key)*chunk_size))
-
-                        bytes_offset = blob.byte_offset
-                        blob_size = blob.size
-                        if blob.size != 0:  # blob.size == 0 when not allocated
-                            offsets_, sizes_, chunk_indices_ = self._get_chunkstorage_info(dset, bytes_offset, chunk_size,
-                                                                                          blob_size, dset_chunks, key)
-
-                            for i in range(len(chunk_indices_)):
-                                stinfo[(*chunk_indices_[i], )] = {'offset': offsets_[i],
-                                                                 'size': sizes_[i]}
-
-            else:
-                # get_num_chunks returns the number of all written chunks, regardless of the dataspace.
-                # HDF5 1.10.5
-
-                num_chunks = dsid.get_num_chunks()
-                if num_chunks == 0:
-                    return dict()
-
-                _get_chunk_info = dsid.get_chunk_info
-                if dset_chunks == chunk_size:
-                    for index in range(num_chunks):
-                        blob = _get_chunk_info(index)
-
-                        key = tuple([a // b for a, b in zip(blob.chunk_offset, chunk_size)])
-
-                        stinfo[key] = {'offset': blob.byte_offset,
-                                       'size': blob.size}
-                else:
-                    for index in range(num_chunks):
-                        blob = _get_chunk_info(index)
-                        key = tuple([a // b for a, b in zip(blob.chunk_offset, chunk_size)])
-
-                        bytes_offset = blob.byte_offset
-                        blob_size = blob.size
-
-                        offsets_, sizes_, chunk_indices = self._get_chunkstorage_info(dset, bytes_offset, chunk_size,
-                                                                                      blob_size, dset_chunks, key)
-
-                        for i in range(len(chunk_indices)):
-                            stinfo[(*chunk_indices[i], )] = {'offset': offsets_[i],
-                                                             'size': sizes_[i]}
+                    break
 
             return stinfo
 
-    def _get_chunkstorage_info(self, dset, bytes_offset, blob_shape, blob_size, dset_chunks, key):
+        # get_num_chunks returns the number of all written chunks, regardless of the dataspace.
+        # HDF5 1.10.5
+        num_chunks = dsid.get_num_chunks()
+        stinfo = dict()
+        if num_chunks == 0:
+            return dict()
+
+        for index in range(num_chunks):
+            blob = dsid.get_chunk_info(index)
+
+            bytes_offset = blob.byte_offset
+            blob_size = blob.size
+
+            key = tuple([a // b for a, b in zip(blob.chunk_offset, dset_chunks)])
+
+            offsets_, sizes_, chunk_indices = HDF5Zarr._get_chunkstorage_info(dsid, bytes_offset, _chunks,
+                                                                          blob_size, dset_chunks, key)
+
+            for i in range(len(chunk_indices)):
+                stinfo[(*chunk_indices[i], )] = {'offset': offsets_[i],
+                                                 'size': sizes_[i]}
+
+        return stinfo
+
+    @staticmethod
+    def _get_chunkstorage_info(dset, bytes_offset, blob_shape, blob_size, dset_chunks, key):
 
         chunk_maxind = np.ceil([a / b for a, b in zip(blob_shape, dset_chunks)]).astype(int)
         chunk_indices = np.indices(chunk_maxind)\
@@ -883,6 +882,12 @@ class HDF5Zarr(object):
         object_codec = None
         dtype_refs = None
 
+
+        try:
+            chunks = dcpl.get_chunk()
+        except:
+            chunks = None
+
         if dset.dtype.names is not None:
             # Structured array with Reference dtype
 
@@ -911,21 +916,19 @@ class HDF5Zarr(object):
                 dset_fillvalue = None
 
             dtype_ = np.dtype(dtype_)
-            object_codec = VLenHDF5String()
             zarray = zgroup.create_dataset(dset.name, shape=dset.shape,
                                            dtype=dtype_,
-                                           chunks=dset.chunks or False,
+                                           chunks=chunks or False,
                                            fill_value=dset_fillvalue,
                                            compression=compression,
-                                           overwrite=True,
-                                           object_codec=object_codec)
+                                           overwrite=True)
 
             dtype_refs = [(dset.dtype.names[i],
                            "Object Reference" if dset_type.get_member_class(i) == h5py.h5t.REFERENCE else dset.dtype[i].str)
                           for i in range(dt_nmembers)]
             dtype_refs = dict(dtype=dtype_refs)
 
-            dset_chunks = dset.chunks
+            dset_chunks = chunks
 
         # variable-length Datasets
         elif h5py.check_vlen_dtype(dset.dtype):
@@ -936,12 +939,12 @@ class HDF5Zarr(object):
                 object_codec = VLenHDF5String()
                 zarray = zgroup.create_dataset(dset.name, shape=dset.shape,
                                                dtype=object,
-                                               chunks=dset.chunks or False,
+                                               chunks=chunks or False,
                                                fill_value=dset.fillvalue,
                                                compression=compression,
                                                overwrite=True,
                                                object_codec=object_codec)
-                dset_chunks = dset.chunks
+                dset_chunks = chunks
 
         elif dset.dtype.hasobject:
             # TO DO test #
@@ -957,7 +960,7 @@ class HDF5Zarr(object):
 
                 zarray = zgroup.create_dataset(dset.name, shape=dset.shape,
                                                dtype=dtype_,
-                                               chunks=dset.chunks or False,
+                                               chunks=chunks or False,
                                                fill_value=dset_fillvalue,
                                                compression=compression,
                                                overwrite=True,
@@ -965,7 +968,7 @@ class HDF5Zarr(object):
 
                 dtype_refs = dict(dtype="Object Reference")
 
-                dset_chunks = dset.chunks
+                dset_chunks = chunks
 
             elif dset_type.get_class() == h5py.h5t.STD_REF_DSETREG:
                 print(f"Dataset {dset.name} is not processed: Region Reference dtype")
@@ -976,9 +979,9 @@ class HDF5Zarr(object):
 
         else:
             if (self.max_chunksize is not None and compression is None and
-                    np.prod(dset.shape) != 0 and (dset.chunks is None or dset.chunks == dset.shape)):
+                    np.prod(dset.shape) != 0 and (chunks is None or chunks == dset.shape)):
 
-                dset_chunks = dset.chunks if dset.chunks else dset.shape
+                dset_chunks = chunks if chunks else dset.shape
                 if dset.shape != () and np.prod(dset.shape) != 0:
                     dset_chunks = list(dset_chunks)
                     dim_ = 0
@@ -994,7 +997,7 @@ class HDF5Zarr(object):
                     dset_chunks = tuple(dset_chunks)
                 dset_chunks = dset_chunks or None
             else:
-                dset_chunks = dset.chunks
+                dset_chunks = chunks
                 if dset_chunks is None and np.prod(dset.shape) == 0:
                     dset_chunks = tuple(s if s != 0 else 1 for s in dset.shape)
 
@@ -1005,7 +1008,7 @@ class HDF5Zarr(object):
                                            compression=compression,
                                            overwrite=True)
 
-        info = self.storage_info(dset, dset_chunks)
+        info = self.storage_info(dset, dset_chunks, chunks)
 
         # Store metadata
         if info:
@@ -1229,12 +1232,16 @@ class FileChunkStore(MutableMapping):
         zchunk_key = self._get_chunkstore_key(chunk_key)
         try:
             zchunks = self._ensure_dict(self._store[zchunk_key])
+        except KeyError:
+            raise KeyError(zchunk_key)
+
+        # get chunk location
+        try:
             chunk_loc = zchunks[chunk_key]
         except KeyError:
             raise KeyError(chunk_key)
 
-        # Read chunk's data...
-
+        # Read chunk's data
         self._source.seek(chunk_loc['offset'], os.SEEK_SET)
         bytes = self._source.read(chunk_loc['size'])
 

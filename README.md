@@ -100,7 +100,7 @@ Export metadata from zarr store to a single json file
 import json
 metadata_file = 'metadata'
 with open(metadata_file, 'w') as mfile:
-    json.dump(zgroup.store.meta_store, mfile)
+    json.dump(zgroup.store.meta_store, mfile, indent=4)
 ```
 
 

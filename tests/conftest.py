@@ -70,6 +70,8 @@ def pytest_generate_tests(metafunc):
     numdset = metafunc.config.getoption('numdataset')
     objnames = metafunc.config.getoption('objnames')
     cls = metafunc.cls
+    if cls is None:
+        return
 
     if len(hdf5files) != 0:
         cls.hdf5files_option = True
