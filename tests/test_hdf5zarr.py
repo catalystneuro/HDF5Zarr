@@ -910,7 +910,6 @@ def _gethfile(prefix: str = None):
     temp_file = tempfile.NamedTemporaryFile(suffix=".hdf5", prefix=prefix, delete=True)
     temp_file.close()
     hfile = h5py.File(temp_file.name, 'w')
-    filename = hfile.filename
     yield hfile
     hfile.close()
 
@@ -967,5 +966,4 @@ def test_maxchunksize_partial(_gethfile):
     max_chunksize = 2**10
     hdf5zarr = HDF5Zarr(hfile, hdf5obj=dsetname, max_chunksize=max_chunksize)
     zgroup = hdf5zarr.consolidate_metadata()
-    print(zgroup.chunks)
     assert_array_equal(zgroup[()],hfile[dsetname][()])

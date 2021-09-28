@@ -1,23 +1,36 @@
 import h5py
 import zarr
-from zarr.storage import array_meta_key
+from zarr.storage import array_meta_key, group_meta_key, attrs_key
 from zarr.storage import ConsolidatedMetadataStore
 import numpy as np
 import numcodecs
 import fsspec
+from fsspec.implementations import local
+from fsspec.spec import AbstractBufferedFile
+from fsspec.asyn import AsyncFileSystem
 from typing import Union
 import os
 import io
 from pathlib import Path
 from collections.abc import MutableMapping
 from pathlib import PurePosixPath
-from zarr.util import json_dumps, json_loads
+from zarr.util import json_dumps, json_loads, normalize_storage_path
 from xdrlib import Unpacker
 import struct
 from sys import stdout
 from warnings import warn
-from fsspec.implementations import local
+from functools import partial
+import copy
+import types
+import tempfile
+import re
+import time
 SYMLINK = '.link'
+
+from dask.distributed import Client, as_completed, get_task_stream, LocalCluster, Worker
+import logging
+import sys
+os.environ["HDF5_USE_FILE_LOCKING"] = "False"
 
 
 class UnpackerVlenString(Unpacker):
@@ -153,7 +166,8 @@ class HDF5Zarr(object):
                  collectattrs: bool = True, uri: str = None, hdf5group: str = None,
                  store: Union[MutableMapping, str, Path] = None, store_path: str = None,
                  store_mode: str = 'a', LRU: bool = False, LRU_max_size: int = 2**30,
-                 max_chunksize=2*2**20, driver: str = None, blocksize: int = 2**15, collectrefs: Union[bool, str, list] = None):
+                 max_chunksize=2*2**20, driver: str = None, blocksize: int = 2**15, collectrefs: Union[bool, str, list] = None,
+                 withdask: bool = True, dask_kwds: dict = {}, follow_symlinks: bool = True):
 
         """
         Args:
@@ -180,7 +194,7 @@ class HDF5Zarr(object):
                                                       for updating zarr hierarchy
                                          'w'          create store, remove data if it exists
                                          'w-' or 'x'  create store, fail if exists
-                                         'a'          read and write, create if it does not exist, default 'r'
+                                         'a'          read and write, create if it does not exist, default 'a'
             store_path:                  string, path in zarr store
             LRU:                         bool, if store is not already zarr.LRUStoreCache, add
                                          a zarr.LRUStoreCache store layer on top of currently used store
@@ -193,7 +207,33 @@ class HDF5Zarr(object):
                                          used for filename cache blocksize only when building metadata,
                                          This is not used for chunkstore when reading data,
                                          default 16kb
+            withdask                     default True
+            dask_kwds                    default {'silence_logs': logging.WARNING,
+                                                  'dashboard_address': None,
+                                                  'processes': True,
+                                                  'n_workers': 1,
+                                                  'threads_per_worker': 1,
+                                                  'worker_class': Worker,
+                                                  }
+            follow_symlinks              only applies when withdask is True, default True
         """
+
+        if withdask:
+            dask_opts = {'silence_logs': logging.WARNING,
+                         'dashboard_address': None,
+                         'processes': True, # turns on Nanny in LocalCluster
+                         'n_workers': 1,
+                         'threads_per_worker': 1,
+                         'worker_class': Worker, # turn off Nanny when processes == True
+                         }
+            if not isinstance(dask_kwds, dict):
+                raise TypeError(f"Expected dict for dask_kwds, recieved {type(dask_kwds)}")
+            else:
+                dask_opts.update(dask_kwds)
+            cluster = LocalCluster(**dask_opts)  # start local workers as processes
+            cluster.adapt(minimum = 1, minimum_cores = 1)
+            self.client = Client(cluster)
+
         # Verify arguments
         if not isinstance(LRU, bool):
             raise TypeError(f"Expected bool for LRU, recieved {type(LRU)}")
@@ -218,6 +258,7 @@ class HDF5Zarr(object):
         if not isinstance(blocksize, int) or blocksize <= 0:
             raise TypeError(f"Expected positive int for blocksize, recieved {type(blocksize)}")
         self.blocksize = blocksize
+        self.follow_symlinks = follow_symlinks
 
         # store and store_mode are passed through to zarr
         self.store_mode = store_mode
@@ -227,7 +268,7 @@ class HDF5Zarr(object):
             self.store = store
 
         # create dictionary mapping hdf5 filter numbers to compatible zarr codec
-        self._hdf5_regfilters_subset = {}
+        HDF5Zarr._hdf5_regfilters_subset = {}
         self._fill_regfilters()
 
         # dictionary to hold addresses of hdf5 objects in file
@@ -243,6 +284,7 @@ class HDF5Zarr(object):
                 raise TypeError(f"Expected non-empty str for hdf5obj, recieved: {hdf5obj}, {type(hdf5obj)}")
             hdf5group = hdf5obj
 
+        self._filename = filename # reference to passed filename
         h5group_filename = False # indicates if filename passed is an h5py group object
         h5obj_filename = False # indicates if filename passed is an h5py object
         if isinstance(filename, (h5py.File, h5py.Group, h5py.Dataset)):
@@ -253,9 +295,18 @@ class HDF5Zarr(object):
                                     f'different from {filename} with name {filename.name}, ambiguous arguments')
                 hdf5group = filename.name
                 h5group_filename = True
+
             self.group = filename
             self.file = filename.file
             filename = filename.file.filename
+            if withdask:
+                fs_h5obj, _, _ = fsspec.get_fs_token_paths(filename)
+                if isinstance(fs_h5obj, local.LocalFileSystem):
+                    try:
+                        fs_h5obj.open(filename, mode='rb')
+                    except Exception as ex:
+                        print(f"can not access hdf5 object filename {filename}")
+                        raise ex
             h5obj_filename = True
             if driver is not None:
                 warn(f"driver {driver} has no effect. filename is an h5py.File")
@@ -265,11 +316,18 @@ class HDF5Zarr(object):
         else:
             self.store_path = store_path
 
-        self.zgroup = zarr.open(self.store, mode=self.store_mode, path=self.store_path)
-        if self.store is None:
+        if withdask:
+            store = self.store
+            self.store = None
+            self.zgroup = zarr.open(self.store, mode=self.store_mode)
             self.store = self.zgroup.store
+        else:
+            self.zgroup = zarr.open(self.store, mode=self.store_mode)
+            if self.store is None:
+                self.store = self.zgroup.store
 
-        self.zgroup = zarr.open(self.store, mode=self.store_mode)
+            self.zgroup = zarr.open(self.store, mode=self.store_mode)
+
         # FileChunkStore requires uri
         if self.uri is None:
             if isinstance(filename, str):
@@ -288,19 +346,52 @@ class HDF5Zarr(object):
         # Access hdf5 file and create zarr hierarchy
         self.hdf5group = hdf5group
         self.filename = filename
-        if driver is None and not h5obj_filename and isinstance(self.filename, str):
+        if not withdask and isinstance(self.filename, str):
             # checks filename file system with fsspec
             try:
+                fs, _, _ = fsspec.get_fs_token_paths(self.filename)
                 if not isinstance(fs, local.LocalFileSystem):
-                    fs, _, _ = fsspec.get_fs_token_paths(self.filename)
-                    tempfilename = re.sub(r'[^\w]', '', filename)
+                    tempfilename = re.sub(r'[^\w]', '', self.filename)
                     temp_file = tempfile.NamedTemporaryFile(suffix="", prefix='temp_'+tempfilename)
                     temp_file_name = temp_file.name
                     temp_file.close()
                     cache_type = 'mmap'  # TO DO
-                    self.filename = fs.open(self.filename, mode='rb', cache_type=cache_type, block_size=self.blocksize, cache_options={'location':temp_file_name})
+                    self.filename = fs.open(self.filename, mode='rb', cache_type=cache_type,
+                                            block_size=self.blocksize,
+                                            cache_options={'location':temp_file_name})
             except:
                 pass
+
+        if withdask:
+            # checks filename file system with fsspec
+            fs = False
+            try:
+                fs, _, _ = fsspec.get_fs_token_paths(self.filename)
+            except:
+                pass
+
+            if isinstance(self.filename, local.LocalFileOpener):
+                self.filename = self.filename.path # avoid unable to pickle in run_create_zarr_hierarchy
+            if fs != False:
+                if not isinstance(fs, local.LocalFileSystem):
+                    try:
+                        tempfilename = re.sub(r'[^\w]', '', self.filename)
+                        temp_file = tempfile.NamedTemporaryFile(suffix="", prefix='temp_'+tempfilename)
+                        temp_file_name = temp_file.name
+                        temp_file.close()
+                        cache_type = 'mmap'
+                        self.filename = fs.open(self.filename, mode='rb', cache_type=cache_type,
+                                                block_size=self.blocksize,
+                                                cache_options={'location':temp_file_name})
+                    except Exception as ex:
+                        print(f"can not access filename {self.filename}")
+                        raise ex
+                elif not h5obj_filename:
+                    try:
+                        fs.open(self.filename, mode='rb')
+                    except Exception as ex:
+                        print(f"can not access filename {self.filename}")
+                        raise ex
 
         if self.store_mode != 'r':
             if not h5obj_filename:
@@ -323,9 +414,24 @@ class HDF5Zarr(object):
 
             if not h5obj_filename:
                 self.group = self.file[self.hdf5group] if self.hdf5group is not None else self.file
-            self.create_zarr_hierarchy(self.group, self.zgroup)
+
+            self.hdf5group = self.hdf5group if self.hdf5group is not None else '/'
+            if withdask:
+                self.run_create_zarr_hierarchy(self.hdf5group)
+            else:
+                self.create_zarr_hierarchy(self.group, self.zgroup)
             if not h5obj_filename:
                 self.file.close()
+
+            if withdask:
+                if store is not None:
+                    try:
+                        store.update(self.store)
+                        self.store = store
+                    except:
+                        warn(f"failed updating passed store {store}, returning zarr object with default store")
+                        pass
+
         if isinstance(self.filename, str):
             self.chunkstore_file = fsspec.open(self.filename, mode='rb')
             self.chunk_store = FileChunkStore(self.store, chunk_source=self.chunkstore_file.open())
@@ -337,6 +443,455 @@ class HDF5Zarr(object):
         # open zarr group
         store_mode_cons = 'r' if self.store_mode == 'r' else 'r+'
         self.zgroup = zarr.open(self.store, mode=store_mode_cons, path=self.store_path, chunk_store=self.chunk_store)
+        if withdask:
+            self.client.close()
+
+    def run_create_zarr_hierarchy(self, hdf5obj):
+        """  Scan hdf5 file and recursively create zarr attributes, groups and dataset structures for accessing data
+        Args:
+          hdf5obj: h5py.Group, h5py.File, or h5py.Dataset object where information is gathered from
+        """
+
+        if h5py.version.hdf5_version_tuple < (1, 10, 5):
+            raise Exception(("HDF5Zarr requires h5py installed with minimum hdf5 version of 1.10.5,\n"
+                             f"Current hdf5 version {h5py.version.hdf5_version},\n"
+                             "h5py installation: https://h5py.readthedocs.io/en/stable/build.html#custom-installation"))
+
+        self._address_dict = self.store[reference_key] if reference_key in self.store else self._address_dict
+        address_dict = self._address_dict
+        _filename = self.filename
+        _file = self.file
+        _client = self.client
+
+        # get cache info
+        cache_location = None
+        if isinstance(self.filename, fsspec.spec.AbstractBufferedFile):
+            try:
+                cache_location = (self.filename.cache.location,
+                                  self.filename.cache.name,
+                                  self.filename.cache.size,
+                                  self.filename.cache.fetcher,
+                                  self.filename.cache.blocks,
+                                  self.filename.cache.blocksize,
+                                  self.filename.fs)
+            except:
+                pass
+
+        # if filename is opened with fsspec, use blocksize argument for cache
+        cache_blocksize = None
+        if isinstance(self.filename, fsspec.spec.AbstractBufferedFile):
+            try:
+                cache_blocksize = self.filename.cache.blocksize
+                self.filename.cache.blocksize = self.blocksize
+            except:
+                pass
+
+        def _gethfile(fname):
+            nonlocal cache_location
+            return HDF5Zarr._gethfile(fname, cache_location=cache_location)
+
+        def get_hdf5obj_nametype(filename, objname: str):
+            nonlocal _gethfile
+            fileid = _gethfile(filename).id
+            if objname != '/':
+                objname = bytes(objname, encoding='utf-8')
+                link_info = fileid.links.get_info(objname)
+                if link_info.type == h5py.h5l.TYPE_SOFT:
+                    objname = fileid.links.get_val(objname)
+                    while fileid.links.get_info(objname).type == h5py.h5l.TYPE_SOFT:
+                        objname = fileid.links.get_val(objname)
+                objinfo = h5py.h5g.get_objinfo(fileid, name=objname, follow_link=False)
+                objname = objname.decode('utf-8')
+                objname = str('/'/PurePosixPath(objname))
+            else:
+                objinfo = h5py.h5g.get_objinfo(fileid, name=bytes(objname, encoding='utf-8'), follow_link=False)
+                link_info = types.SimpleNamespace()
+                link_info.type = None
+                link_info.u = None
+            return objname, objinfo.objno, objinfo.type, link_info.type, link_info.u
+
+        _get_hdf5obj_nametype = _client.submit(get_hdf5obj_nametype, _filename, hdf5obj)
+
+        userblock_size = self.file.userblock_size
+        def _get_sizes(_filename):
+            # returns file's unit_address_size, unit_length_size, userblock_size
+            nonlocal _gethfile, userblock_size
+            hf = _gethfile(_filename)
+            return *hf.id.get_create_plist().get_sizes(), userblock_size
+
+        _sizes = _client.submit(_get_sizes, _filename)
+
+        uri, _hdf5_regfilters_subset = self.uri, self._hdf5_regfilters_subset
+        len_iterchunks = 40
+        max_chunksize = self.max_chunksize
+        def _createiter(name, link_info, basename=b'', last=None, _filename=None,
+                        out=[[],[]], link_info_type_u=None, fid=None, skip_paths=None):
+            """
+            basename: prefix for object name
+            last: check if last item in group to end iterate loop
+            """
+            nonlocal _gethfile
+
+            if link_info:
+                link_info_type, link_info_u = link_info.type, link_info.u
+            else:
+                link_info_type, link_info_u = link_info_type_u
+                if link_info_type_u == (None, None):
+                    # occurs when hdf5obj passed points to '/'
+                    link_info_type = h5py.h5l.TYPE_HARD
+
+            if _filename is not None and fid is None:
+               fid = _gethfile(_filename).id
+
+            basename = b'' if basename == b'/' else basename
+            name = basename+b'/'+name
+            if name == last:
+                return
+            if len([n for n in skip_paths if name.startswith(n)]) == 0:
+                # only run if name is not already processed
+                addr_info = None
+                if link_info_type == h5py.h5l.TYPE_EXTERNAL:
+                    raise Exception(f"Object {name} is not processed: External Link")
+                elif link_info_type == h5py.h5l.TYPE_SOFT:
+                    objinfo = h5py.h5g.get_objinfo(fid, name=name)
+                    targetpath = HDF5Zarr._get_name(None, name, hfid = fid)
+                    #address_dict[objno[0]] = targetpath
+                    out[1].append([b'SoftLink', [name, objinfo.objno, objinfo.type, targetpath]])
+                elif link_info_type == h5py.h5l.TYPE_HARD:
+                    objinfo = h5py.h5g.get_objinfo(fid, name=name, follow_link=False)
+                    if link_info_u is None:
+                        raise Exception("link_info address is None")
+
+                    if objinfo.type == h5py.h5g.GROUP:
+                        zobj = zarr.open(None, mode='a', path=name.decode('utf-8'))
+                        group_call_items = [partial(_createiter, basename=name, _filename = _filename),
+                                            partial(_createiter, basename=basename, last=name, _filename=_filename),
+                                            name]
+
+                    elif objinfo.type == h5py.h5g.DATASET:
+                        name = name[:-1] if name.endswith(b'/') else name
+                        dsetid = h5py.h5o.open(fid, name)
+                        zobj, info = HDF5Zarr._create_zarr_dset(fid, uri, _hdf5_regfilters_subset, dsetid, max_chunksize, name.decode('utf-8'), len_iterchunks)
+                        if info is not None:
+                            out[1].append([b'Chunks', info])
+
+                    name = name[:-1] if name != b'/' and name.endswith(b'/') else name
+                    addr_info = {link_info_u: name.decode('utf-8')}
+                    out[1].append((b'Attribute',name,)) # attrs
+                    out[0].append([zobj.store, addr_info]) # dict_update
+                    if objinfo.type == h5py.h5g.GROUP:
+                        return group_call_items
+
+
+        # allows parallel branching at each sub group when calling id.links.iterate
+        def _linkitercall(_createiterfunc, oname, objtype_dset = False, skip_paths = None):
+            nonlocal _gethfile, _filename
+            idx = 0
+            fid = _gethfile(_filename).id
+            funccalls = []
+            ret = [[],[]]
+            while True:
+                _createiterfunc = partial(_createiterfunc, out=ret, fid=fid, skip_paths=skip_paths)
+                if objtype_dset:
+                    valiterate = _createiterfunc(bytes('', encoding='utf-8'), None)
+                    break # ret points to output
+                valiterate = fid.links.iterate(_createiterfunc, obj_name=oname, info=True, idx=idx)
+                if valiterate[0] is None:
+                    break
+                idx = valiterate[1] - 1
+                _partialcreateiter, _createiterfunc, _name = *valiterate[0],
+                if len([n for n in skip_paths if _name.startswith(n)]) == 0:
+                    funccalls.append([_partialcreateiter, _name])
+
+            return funccalls, ret
+
+        softlinks = []
+        futures = []
+        targetpath_processed = []
+        processed_paths = []
+        skip_paths = []
+        hdf5obj_targetname, objno, objtype, link_info_type, link_info_u = _get_hdf5obj_nametype.result()
+        targetpath_items = [(hdf5obj, hdf5obj_targetname, objno, objtype, link_info_type, link_info_u)]
+        while len(targetpath_items) > 0:
+            # soft link targets not located in hdf5obj group passed to HDF5Zarr are processed via this loop
+            # except first loop, all link_info_type are softlinks
+            if len(targetpath_processed) != 0:
+                targetpath_i = targetpath_items.pop()
+                hdf5obj, hdf5obj_targetname, objno, objtype, link_info_type, link_info_u = targetpath_i
+
+            targetpath_processed.append([hdf5obj_targetname, objno, objtype])
+
+            if link_info_type == h5py.h5l.TYPE_SOFT:
+                if objtype != h5py.h5g.DATASET:
+                    _partialcreateiter = partial(_createiter, basename=bytes(hdf5obj_targetname, encoding='utf-8'), _filename = _filename)
+                    futures += [_client.submit(_linkitercall, _partialcreateiter, bytes(hdf5obj, encoding='utf-8'),
+                                               skip_paths = skip_paths)]
+                softlinks.insert(0, [bytes(hdf5obj, encoding='utf-8'), objno, objtype, hdf5obj_targetname])
+            elif link_info_type == h5py.h5l.TYPE_HARD or (link_info_type, link_info_u) == (None, None):
+                if objtype != h5py.h5g.DATASET:
+                    _partialcreateiter = partial(_createiter, basename=bytes(hdf5obj_targetname, encoding='utf-8'), _filename = _filename)
+                    futures += [_client.submit(_linkitercall, _partialcreateiter, bytes(hdf5obj, encoding='utf-8'),
+                                               skip_paths = skip_paths)]
+            elif link_info_type == h5py.h5l.TYPE_EXTERNAL:
+                raise Exception(f"Passed object {hdf5obj_targetname} is not processed: External Link")
+            else:
+                raise TypeError
+
+            if objtype == h5py.h5g.DATASET:
+                _partialcreateiter = partial(_createiter, basename=bytes(hdf5obj_targetname, encoding='utf-8'),
+                                          _filename = _filename, link_info_type_u = (link_info_type, link_info_u))
+                futures += [_client.submit(_linkitercall, _partialcreateiter, b'', objtype_dset=True,
+                                           skip_paths = skip_paths)]
+
+            if objno[0] not in address_dict:
+                address_dict[objno[0]]=hdf5obj_targetname
+
+            if self.collectattrs:
+                futures += [_client.submit(HDF5Zarr.copy_attrs_data_to_zarr_store, _filename,
+                                           address_dict, bytes(hdf5obj_targetname, encoding='utf-8'),
+                                           cache_location)]
+
+            outattrs = []
+            dict_update = []
+            chunk_futures = []
+            seq = as_completed(futures, with_results=True)
+            _task_numlim = 40 # TO DO, soft cap on number of tasks
+            batches_remaining = []
+            for batch in seq.batches():
+                count_remaining = seq.count() # counts both in progress and finished
+
+                # process batches that do not call new tasks
+                keep_batch = []
+                for batch_item in batch:
+                    future, results = batch_item
+                    # check if copy_attrs_data_to_zarr_store call
+                    if isinstance(results, dict):
+                        outattrs.append(results)
+                    elif results is None:
+                        # check if dset object
+                        if objtype != h5py.h5g.DATASET:
+                            raise Exception(f'None return only in case of hdf5_group referring to a dataset')
+                    else:
+                        keep_batch.append(batch_item)
+                batch = keep_batch
+
+                # update batch_process
+                numbatchitems = _task_numlim - count_remaining
+                if numbatchitems > 0:
+                    batch_process = batches_remaining[:numbatchitems]
+                    batches_remaining[:numbatchitems] = []
+                    numbatchitems = numbatchitems - len(batch_process)
+                    if numbatchitems > 0:
+                        batch_process += batch[:numbatchitems]
+                        batch[:numbatchitems] = []
+                    batches_remaining += batch
+                else:
+                    batches_remaining += batch
+                    continue
+
+                for future, results in batch_process:
+                    # check if copy_attrs_data_to_zarr_store call
+                    if isinstance(results, dict):
+                        outattrs.append(results)
+                        continue
+                    elif results is None:
+                        # check if dset object
+                        if objtype != h5py.h5g.DATASET:
+                            raise Exception(f'None return only in case of hdf5_group referring to a dataset')
+                        continue
+
+                    # linkitercall
+                    funccalls, outitem = results
+                    for call_item in funccalls:
+                        item_name = call_item[1]
+                        if len([n for n in skip_paths if item_name.startswith(n)]) == 0:
+                            seq.add(_client.submit(_linkitercall, *call_item, skip_paths = skip_paths, pure=False))
+                            if self.collectattrs:
+                                seq.add(_client.submit(HDF5Zarr.copy_attrs_data_to_zarr_store, _filename, address_dict,
+                                                       item_name, cache_location))
+
+                    dict_update += outitem[0]
+                    for rettype, item in outitem[1]:
+                        if rettype == b'SoftLink':
+                            # soft links
+                            softlinks.append(item)
+                        elif rettype == b'Attribute':
+                            if self.collectattrs:
+                                item_name = item
+                                seq.add(_client.submit(HDF5Zarr.copy_attrs_data_to_zarr_store, _filename, address_dict,
+                                                       item_name, cache_location))
+                        elif rettype == b'Chunks':
+                            # chunked
+                            # TO DO
+                            item_name, dset_chunks, _chunks, chunk_maxind = item
+                            chunk_indices = np.indices(chunk_maxind)\
+                                              .transpose(*range(1, len(chunk_maxind)+1), 0)\
+                                              .reshape(np.prod(chunk_maxind), len(chunk_maxind))
+                            chunk_indices = [tuple(c) for c in chunk_indices]
+
+                            len_iterchunks = 40
+                            max_numcalls = 8
+                            if len(chunk_indices)/max_numcalls > len_iterchunks:
+                                len_iterchunks = len(chunk_indices)//max_numcalls + 1
+                            numcalls = len(chunk_indices)//len_iterchunks + 1
+                            for c in range(numcalls):
+                                _indices = chunk_indices[c*len_iterchunks:(c+1)*len_iterchunks]
+                                if len(_indices) > 0:
+                                    _chfutureattr = self.client.submit(HDF5Zarr._get_storage_info_chunked, dset_chunks, _chunks,
+                                                                       chunk_maxind=chunk_maxind, chunk_indices=_indices,
+                                                                       name=bytes(item_name, 'utf-8'), filename=_filename,
+                                                                       cache_location=cache_location)
+                                    chunk_futures.append(_chfutureattr)
+
+            seq = as_completed(chunk_futures, with_results=True)
+            for future, results in seq:
+                if isinstance(results, tuple):
+                    outattrs.append(results)
+                else:
+                    raise Exception("Expected tuple for chunk futures")
+
+            if len(targetpath_processed) == 1:
+                # collect references only if not all are already in address_dict
+                if self.collectrefs and hdf5obj_targetname != '/':
+                    if self.collectrefs is True:
+                        def _get_address(name, info):
+                            obj = self.file[name]
+                            address_dict[info.addr] = obj.name
+
+                        # add object addresses in file to address_dict
+                        address_dict[h5py.h5o.get_info(self.file.id).addr] = self.file.name
+                        h5py.h5o.visit(self.file.id, _get_address, obj_name=bytes(self.file.name, encoding='utf-8'), info=True)
+                    else:
+                        self.collectrefs = self.collectrefs if not isinstance(self.collectrefs, str) else [self.collectrefs]
+                        for name in self.collectrefs:
+                            name = str("/"/PurePosixPath(name))  # get absolute name
+                            if name in address_dict.values():
+                                continue
+                            link_info = self.file.id.links.get_info(bytes(name, encoding='utf-8'))
+                            if link_info.type == h5py.h5l.TYPE_EXTERNAL:
+                                warn(f"Skipped {name} in collectrefs, External Link")
+                                continue
+                            if link_info.type == h5py.h5l.TYPE_SOFT:
+                                try:
+                                    name = self.get_name(self.file, name)
+                                    address_dict[link_info.u] = name
+                                except:
+                                    warn(f"Skipped {name} in collectrefs, Soft Link. target address not found")
+                            else:  # hard link
+                                address_dict[link_info.u] = name
+
+                unit_address_size, unit_length_size, userblock_size = _sizes.result()
+                address_dict['source'] = {'uri': uri,
+                                          'offset_byte_size': unit_address_size,
+                                          'length_byte_size': unit_length_size,
+                                          'userblock_size': userblock_size}
+
+            zgroup = zarr.open(self.store, mode='a')
+            for store_update, addr_info in dict_update:
+                for key, val in store_update.items():
+                    if key in self.store and val != self.store[key]:
+                        info = {key: val}
+                        name = str('/'/PurePosixPath(key).parent)
+                        info['source'] = {'uri': uri,
+                                          'array_name': name}
+                        zarray = zgroup[name]
+                        FileChunkStore._chunks_info_update(zarray, info)
+                    else:
+                        self.store[key] = val
+                for key, val in addr_info.items():
+                    if key in address_dict:
+                        if val != address_dict[key]:
+                            raise Exception(f'key {key}, address information, already in store with different value')
+                    else:
+                        address_dict[key] = val
+
+            for item in outattrs:
+                if isinstance(item, tuple):
+                    info = item[0]
+                    name = item[1].decode('utf-8')
+                    info['source'] = {'uri': uri,
+                                      'array_name': name}
+                    zarray = zgroup[name]
+                    FileChunkStore._chunks_info_update(zarray, info)
+                else:
+                    for key, val in item.items():
+                        if key.endswith(attrs_key):
+                            if key in self.store:
+                                if val != self.store[key]:
+                                    valb = val.decode('utf-8') if isinstance(val, bytes) else val
+                                    if valb != self.store[key]:
+                                        info = {key: val}
+                                        name = str('/'/PurePosixPath(key).parent)
+                                        info['source'] = {'uri': uri,
+                                                          'array_name': name}
+                                        zarray = zgroup[name]
+                                        FileChunkStore._chunks_info_update(zarray, info)
+                            else:
+                                self.store[key] = val.decode('utf-8') if isinstance(val, bytes) else val
+
+            processed_paths.append(hdf5obj_targetname)
+            skip_paths.append(bytes(hdf5obj_targetname, encoding='utf-8'))
+            # add soft links
+            # loop to collect symlinks, will run only once if hdf5obj is h5py.File or h5py.Dataset
+            # if hdf5obj is instance of h5py.Group with symlinks pointing to other groups outside the hdf5obj group,
+            # then recursively follows the symlinks
+            remattrs = []
+            _to_targetpath = dict()
+            _to_softlinks = set()
+            _to_softlinks_paths = []
+            for item in softlinks:
+                name_abs, objno, objtype, targetpath = item  # name_abs is softlink's absolute path
+                # name_abs: bytes, objno: tuple, targetpath: str
+                # get absolute target path
+                if objno[0] in address_dict:
+                    if targetpath != address_dict[objno[0]]:
+                        raise Exception(f"target path {targetpath} for obj {objno[0]} differs from path already " +
+                                        f"in store {address_dict[objno[0]]}")
+                else:
+                    address_dict[objno[0]] = targetpath
+
+                if targetpath not in zgroup or (targetpath == '/' and targetpath not in processed_paths):
+                    if self.follow_symlinks:
+                        _to_softlinks.add(tuple(item))
+                        # targetpath starts with '/'
+                        if len([True for n in _to_softlinks_paths if targetpath.startswith(n)]) == 0:
+                            print(f"soft link {name_abs.decode('utf-8')} refers to object {targetpath} not in {hdf5obj} group" +
+                                  f" creating hierarchy for {targetpath}")
+                            _to_softlinks_paths = [n for n in _to_softlinks_paths if not n.startswith(targetpath)]
+                            _to_softlinks_paths.append(targetpath)
+                            if len([targetpath for n in processed_paths if targetpath.startswith(n)]) == 0:
+                                link_info_u = objno[0]
+                                targetpath_i = (targetpath, targetpath, objno, objtype, h5py.h5l.TYPE_HARD, link_info_u)
+                                _to_targetpath[targetpath] = targetpath_i
+                            else:
+                                raise Exception("Error in processing softlinks")
+
+                elif name_abs not in zgroup and objtype in (h5py.h5g.DATASET, h5py.h5g.GROUP):
+                    # targetpath in self.zgroup
+                    name_abs = name_abs.decode('utf-8')
+                    ztarget = zgroup[targetpath]
+                    # copy store from target
+                    HDF5Zarr.copy_storeobj(self.store, targetpath, name_abs, copy_chunks_info = True)
+                    if isinstance(ztarget, zarr.Array):
+                        zgroup[name_abs].attrs[SYMLINK] = targetpath
+                    elif isinstance(ztarget, zarr.Group):
+                        zgroup_path = zgroup[name_abs].create_group(SYMLINK, overwrite=True)
+                        zgroup_path.attrs[name_abs] = targetpath
+
+            softlinks = list(_to_softlinks)
+            targetpath_items = [el for el in targetpath_items if el[0] != '/' and el[0] not in zgroup]
+            _to_targetpath = [val for targetpath,val in _to_targetpath.items() if targetpath in _to_softlinks_paths]
+            targetpath_items = list(set(targetpath_items + _to_targetpath))
+            targetpath_items.sort(key=lambda x: x[1]) # sort according to targetpath
+
+        FileChunkStore.obj_address_info(self.store, address_dict)
+
+        # revert blocksize
+        if cache_blocksize is not None:
+            try:
+                self.filename.cache.blocksize = cache_blocksize
+            except:
+                pass
 
     def consolidate_metadata(self, metadata_key='.zmetadata'):
         '''
@@ -369,75 +924,158 @@ class HDF5Zarr(object):
 
         return self.zgroup
 
-    def _fill_regfilters(self):
+    @staticmethod
+    def get_filename(filename, cache_location = None, _cacheblocks = True):
+        if cache_location is not None:
+            location, name, size, fetcher, blocks, blocksize, fs = cache_location
+            filename = fs.open(filename.path, mode='rb', cache_type='mmap', block_size=blocksize, size=size, cache_options={'location':location, 'blocks': blocks})
+            return filename
+
+        if _cacheblocks:
+            location = filename.cache.location
+            blocks = filename.cache.blocks
+            name = filename.cache.name
+            size = filename.cache.size
+            fetcher = filename.cache.fetcher
+            blocksize = filename.cache.blocksize
+            fs = fsspec.filesystem('https')
+            filename = fs.open(filename.path, mode='rb', cache_type='mmap', block_size=blocksize, size=size, cache_options={'location':location, 'blocks': blocks})
+        elif isinstance(filename, str):
+            fname = None
+            c = 0
+            while fname is None:
+                # in case too many files are open
+                try:
+                    fname = local.LocalFileSystem(skip_instance_cache=True).open(filename, mode='rb')
+                except Exception as ex:
+                    if c > 3600:
+                        raise ex
+                    else:
+                        time.sleep(0.4)
+                c += 1
+            filename = fname
+        else:
+            fs = filename.fs
+            filename = fs.open(filename.path, mode='rb')
+        return filename
+
+
+    @staticmethod
+    def _gethfile(filename, cache_location=None):
+        if cache_location is None:
+            if isinstance(filename, str):
+                fname = HDF5Zarr.get_filename(filename, cache_location, _cacheblocks=False)
+                return h5py.File(fname, mode='r')
+            hf = h5py.File(filename, mode='r')
+            return hf
+        hf = h5py.File(HDF5Zarr.get_filename(filename, cache_location), mode='r')
+        return hf
+
+    @staticmethod
+    def _fill_regfilters(n=None):
+        if n is not None:
+            return HDF5Zarr._hdf5_regfilters_subset[n]
 
         # h5py.h5z.FILTER_DEFLATE == 1
-        self._hdf5_regfilters_subset[1] = numcodecs.Zlib
+        HDF5Zarr._hdf5_regfilters_subset[1] = numcodecs.Zlib
 
         # h5py.h5z.FILTER_SHUFFLE == 2
-        self._hdf5_regfilters_subset[2] = None
+        HDF5Zarr._hdf5_regfilters_subset[2] = None
 
         # h5py.h5z.FILTER_FLETCHER32 == 3
-        self._hdf5_regfilters_subset[3] = None
+        HDF5Zarr._hdf5_regfilters_subset[3] = None
 
         # h5py.h5z.FILTER_SZIP == 4
-        self._hdf5_regfilters_subset[4] = None
+        HDF5Zarr._hdf5_regfilters_subset[4] = None
 
         # h5py.h5z.FILTER_SCALEOFFSET == 6
-        self._hdf5_regfilters_subset[6] = None
+        HDF5Zarr._hdf5_regfilters_subset[6] = None
 
         # LZO
-        self._hdf5_regfilters_subset[305] = None
+        HDF5Zarr._hdf5_regfilters_subset[305] = None
 
         # BZIP2
-        self._hdf5_regfilters_subset[307] = numcodecs.BZ2
+        HDF5Zarr._hdf5_regfilters_subset[307] = numcodecs.BZ2
 
         # LZF
-        self._hdf5_regfilters_subset[32000] = None
+        HDF5Zarr._hdf5_regfilters_subset[32000] = None
 
         # Blosc
-        self._hdf5_regfilters_subset[32001] = numcodecs.Blosc
+        HDF5Zarr._hdf5_regfilters_subset[32001] = numcodecs.Blosc
 
         # Snappy
-        self._hdf5_regfilters_subset[32003] = None
+        HDF5Zarr._hdf5_regfilters_subset[32003] = None
 
         # LZ4
-        self._hdf5_regfilters_subset[32004] = numcodecs.LZ4
+        HDF5Zarr._hdf5_regfilters_subset[32004] = numcodecs.LZ4
 
         # bitshuffle
-        self._hdf5_regfilters_subset[32008] = None
+        HDF5Zarr._hdf5_regfilters_subset[32008] = None
 
         # JPEG-LS
-        self._hdf5_regfilters_subset[32012] = None
+        HDF5Zarr._hdf5_regfilters_subset[32012] = None
 
         # Zfp
-        self._hdf5_regfilters_subset[32013] = None
+        HDF5Zarr._hdf5_regfilters_subset[32013] = None
 
         # Fpzip
-        self._hdf5_regfilters_subset[32014] = None
+        HDF5Zarr._hdf5_regfilters_subset[32014] = None
 
         # Zstandard
-        self._hdf5_regfilters_subset[32015] = numcodecs.Zstd
+        HDF5Zarr._hdf5_regfilters_subset[32015] = numcodecs.Zstd
 
         # FCIDECOMP
-        self._hdf5_regfilters_subset[32018] = None
+        HDF5Zarr._hdf5_regfilters_subset[32018] = None
 
-    def copy_attrs_data_to_zarr_store(self, h5obj, zobj):
+    @staticmethod
+    def _get_attrval(attrid):
+        dtype = attrid.dtype
+        shape = attrid.shape
+        htype = h5py.h5t.py_create(dtype)
+        if dtype.subdtype is not None:
+            subdtype, subshape = dtype.subdtype
+            shape = attr.shape + subshape   # (5, 3)
+            dtype = subdtype                # 'f'
+        arr = np.ndarray(shape, dtype=dtype, order='C')
+        attrid.read(arr, mtype=htype)
+
+        string_info = h5py.h5t.check_string_dtype(dtype)
+        if string_info and (string_info.length is None):
+            arr = np.array([
+                b.decode('utf-8', 'surrogateescape') for b in arr.flat
+            ], dtype=dtype).reshape(arr.shape)
+        return arr[()] if len(arr.shape) == 0 else arr
+
+
+    @staticmethod
+    def copy_attrs_data_to_zarr_store(filename, address_dict, name, cache_location=None):
         """ Convert hdf5 attributes to json compatible form and create zarr attributes
         Args:
             h5obj:   hdf5 object
             zobj:    zarr object
         """
 
-        try:
-            attrs = dict(h5obj.attrs)
-            zobj.attrs.put(attrs)
-            return
-        except Exception:
-            # iterate over attributes
-            pass
+        zobj = zarr.open(None, mode='a', path=name)
 
-        for key, val in h5obj.attrs.items():
+        fileid = HDF5Zarr._gethfile(filename, cache_location).id
+
+        attrs = dict()
+        attrid = True
+        n = 0
+        while attrid is not None:
+            try:
+                attrid = h5py.h5a.open(fileid, obj_name=name, index=n)
+            except Exception as ex:
+                attrid = None
+            if attrid is None:
+                break
+
+            attrval = HDF5Zarr._get_attrval(attrid)
+            key = attrid.get_name()
+            attrs[key.decode('utf-8')]=attrval
+            n+=1
+
+        for key, val in attrs.items():
 
             # convert object references in attrs to str
             # e.g. h5py.h5r.Reference instance to "/processing/ophys/ImageSegmentation/ImagingPlane"
@@ -459,49 +1097,62 @@ class HDF5Zarr(object):
                 if val:
                     # not a null reference
                     try:
-                        deref_id = h5py.h5r.dereference(val, self.file.id)
+                        deref_id = h5py.h5r.dereference(val, fileid)
                         objinfo = h5py.h5g.get_objinfo(deref_id)  # get_objinfo follow_link arg determines target of soft links
                         objno = objinfo.objno
-                        if objno[0] in self._address_dict:
-                            deref_objname = self._address_dict[objno[0]]
+                        if objno[0] in address_dict:
+                            deref_objname = address_dict[objno[0]]
                         else:
-                            deref_objname = h5py.h5r.get_name(val, self.file.id)
+                            deref_objname = h5py.h5r.get_name(val, fileid)
                             deref_objname = deref_objname.decode('utf-8')
                     except:
                         print(f"Attribute value of type {type(val)} is not processed: \
-                                Attribute {key} of object {h5obj.name}, unable to get target name")
+                                Attribute {key} of object {name}, unable to get target name")
                         continue
 
                     if deref_objname:
                         val = '//' + deref_objname
                     else:
                         print(f"Attribute value of type {type(val)} is not processed: \
-                                Attribute {key} of object {h5obj.name}, anonymous target")
+                                Attribute {key} of object {name}, anonymous target")
                         continue
                 else:
                     val = None
             elif isinstance(val, h5py.h5r.RegionReference):
-                print(f"Attribute value of type {type(val)} is not processed: Attribute {key} of object {h5obj.name}")
+                print(f"Attribute value of type {type(val)} is not processed: Attribute {key} of object {name}")
                 continue
 
+            attrs[key]=val
+
+        try:
+            zobj.attrs.put(attrs)
+            return zobj.store
+        except Exception:
+            # iterate over attributes
+            pass
+
+        for key, val in attrs.items():
             try:
                 zobj.attrs[key] = val
             except Exception:
-                print(f"Attribute value of type {type(val)} is not processed: Attribute {key} of object {h5obj.name}")
+                print(f"Attribute value of type {type(val)} is not processed: Attribute {key} of object {name}")
 
-    def storage_info(self, dset, dset_chunks, _chunks):
-        if dset.shape is None:
+        return zobj.store
+
+
+    @staticmethod
+    def storage_info(dsid, dset_chunks, _chunks, len_iterchunks=None):
+        if dsid.shape is None:
             # Null dataset
             return dict()
 
-        dsid = dset.id
         if _chunks is None:
             # get offset for Non-External datasets
             if dsid.get_offset() is None:
                 return dict()
             else:
                 if dset_chunks is None:
-                    key = (0,) * (len(dset.shape) or 1)
+                    key = (0,) * (len(dsid.shape) or 1)
                     return {key: {'offset': dsid.get_offset(),
                                   'size': dsid.get_storage_size()}}
                 else:
@@ -511,7 +1162,7 @@ class HDF5Zarr(object):
                     storage_size = dsid.get_storage_size()
                     key = (0,)*len(dset_chunks)
 
-                    offsets_, sizes_, chunk_indices = self._get_chunkstorage_info(dset, bytes_offset, dset.shape,
+                    offsets_, sizes_, chunk_indices = HDF5Zarr._get_chunkstorage_info(dsid, bytes_offset, dsid.shape,
                                                                                   storage_size, dset_chunks, key)
 
                     for i in range(len(chunk_indices)):
@@ -522,13 +1173,24 @@ class HDF5Zarr(object):
 
         else:
             chunk_maxind = np.ceil([a / b for a, b in zip(dsid.shape, _chunks)]).astype(int)
-            stinfo = HDF5Zarr._get_storage_info_chunked(dset_chunks, _chunks, dsid=dsid, chunk_maxind=chunk_maxind)
-            return stinfo
+            if len_iterchunks and np.prod(chunk_maxind)>len_iterchunks:
+                return (dset_chunks, _chunks, chunk_maxind)
+            else:
+                stinfo, _ = HDF5Zarr._get_storage_info_chunked(dset_chunks, _chunks, dsid=dsid, chunk_maxind=chunk_maxind)
+                return stinfo
 
-    def _get_storage_info_chunked(dset_chunks, _chunks, dsid=None, chunk_maxind=None, chunk_indices=None):
+    @staticmethod
+    def _get_storage_info_chunked(dset_chunks, _chunks, dsid=None, chunk_maxind=None, chunk_indices=None, name=None,
+                                  filename=None, cache_location=None):
 
         space_status = h5py.h5d.SPACE_STATUS_ALLOCATED
         stinfo = dict()
+
+
+        if dsid is None:
+            # pass name and cache_location
+            fileid = HDF5Zarr._gethfile(filename, cache_location).id
+            dsid = h5py.h5o.open(fileid, name)
 
         # TO DO #
         if space_status == h5py.h5d.SPACE_STATUS_ALLOCATED:
@@ -539,8 +1201,16 @@ class HDF5Zarr(object):
                 chunk_indices = [tuple(c) for c in chunk_indices]
 
             _indices_chunks = [sum([i[k]*np.prod(chunk_maxind[k+1:]) for k in range(len(chunk_maxind)-1)])+i[-1] for i in chunk_indices]
+
+            blob = None
             for index in _indices_chunks:
-                blob = dsid.get_chunk_info(index)
+                try:
+                    blob = dsid.get_chunk_info(index)
+                except:
+                    blob = None
+
+                if blob is None:
+                    break
                 bytes_offset = blob.byte_offset
                 blob_size = blob.size
                 if blob_size is not None and bytes_offset is not None and blob_size>0 and bytes_offset >=0:  # blob.size == 0 when not allocated
@@ -553,19 +1223,18 @@ class HDF5Zarr(object):
                     for i in range(len(chunk_indices)):
                         stinfo[(*chunk_indices[i], )] = {'offset': offsets_[i],
                                                          'size': sizes_[i]}
-                else:
-                    break
 
-            return stinfo
+            if blob is not None:
+                return stinfo, name
 
         # get_num_chunks returns the number of all written chunks, regardless of the dataspace.
         # HDF5 1.10.5
         num_chunks = dsid.get_num_chunks()
-        stinfo = dict()
         if num_chunks == 0:
-            return dict()
+            return stinfo, name
 
-        for index in range(num_chunks):
+        _indices_chunks = [i for i in _indices_chunks if index<i<num_chunks]
+        for index in _indices_chunks:
             blob = dsid.get_chunk_info(index)
 
             bytes_offset = blob.byte_offset
@@ -580,7 +1249,7 @@ class HDF5Zarr(object):
                 stinfo[(*chunk_indices[i], )] = {'offset': offsets_[i],
                                                  'size': sizes_[i]}
 
-        return stinfo
+        return stinfo, name
 
     @staticmethod
     def _get_chunkstorage_info(dset, bytes_offset, blob_shape, blob_size, dset_chunks, key):
@@ -743,7 +1412,7 @@ class HDF5Zarr(object):
 
                 # attributes
                 if self.collectattrs:
-                    self.copy_attrs_data_to_zarr_store(obj, self.zgroup[obj.name])
+                    self._copy_attrs_data_to_zarr_store(obj, self.zgroup[obj.name])
 
         if not isinstance(h5py_group, h5py.Dataset):
             # add h5py_group address
@@ -754,7 +1423,7 @@ class HDF5Zarr(object):
             # create zarr hierarchy
             self.file.id.links.visit(_visit_create_zarr_hierarchy, obj_name=bytes(h5py_group_name, encoding='utf-8'), info=True)
             if self.collectattrs:
-                self.copy_attrs_data_to_zarr_store(self.group, self.zgroup)
+                self._copy_attrs_data_to_zarr_store(self.group, self.zgroup)
         else:
             link_info = self.file.id.links.get_info(bytes(self.group.name, encoding='utf-8'))
 
@@ -781,7 +1450,7 @@ class HDF5Zarr(object):
             self._create_zarr_hierarchy(h5py_group, dsetparent)
             self.zgroup = dsetparent[h5py_group.name]
             if self.collectattrs:
-                self.copy_attrs_data_to_zarr_store(h5py_group, self.zgroup)
+                self._copy_attrs_data_to_zarr_store(h5py_group, self.zgroup)
 
         # collect references only if not all are already in self._address_dict
         if self.collectrefs and h5py_group.name != '/':
@@ -823,6 +1492,7 @@ class HDF5Zarr(object):
 
     @staticmethod
     def get_name(hobj, name):
+        # used in create_zarr_hierarchy, without dask
         # return a hardlink to name. name is relative to hobj
         if name == '/':
             return name
@@ -882,12 +1552,6 @@ class HDF5Zarr(object):
         object_codec = None
         dtype_refs = None
 
-
-        try:
-            chunks = dcpl.get_chunk()
-        except:
-            chunks = None
-
         if dset.dtype.names is not None:
             # Structured array with Reference dtype
 
@@ -916,9 +1580,10 @@ class HDF5Zarr(object):
                 dset_fillvalue = None
 
             dtype_ = np.dtype(dtype_)
+
             zarray = zgroup.create_dataset(dset.name, shape=dset.shape,
                                            dtype=dtype_,
-                                           chunks=chunks or False,
+                                           chunks=dset.chunks or False,
                                            fill_value=dset_fillvalue,
                                            compression=compression,
                                            overwrite=True)
@@ -928,7 +1593,7 @@ class HDF5Zarr(object):
                           for i in range(dt_nmembers)]
             dtype_refs = dict(dtype=dtype_refs)
 
-            dset_chunks = chunks
+            dset_chunks = dset.chunks
 
         # variable-length Datasets
         elif h5py.check_vlen_dtype(dset.dtype):
@@ -939,12 +1604,12 @@ class HDF5Zarr(object):
                 object_codec = VLenHDF5String()
                 zarray = zgroup.create_dataset(dset.name, shape=dset.shape,
                                                dtype=object,
-                                               chunks=chunks or False,
+                                               chunks=dset.chunks or False,
                                                fill_value=dset.fillvalue,
                                                compression=compression,
                                                overwrite=True,
                                                object_codec=object_codec)
-                dset_chunks = chunks
+                dset_chunks = dset.chunks
 
         elif dset.dtype.hasobject:
             # TO DO test #
@@ -960,7 +1625,7 @@ class HDF5Zarr(object):
 
                 zarray = zgroup.create_dataset(dset.name, shape=dset.shape,
                                                dtype=dtype_,
-                                               chunks=chunks or False,
+                                               chunks=dset.chunks or False,
                                                fill_value=dset_fillvalue,
                                                compression=compression,
                                                overwrite=True,
@@ -968,7 +1633,7 @@ class HDF5Zarr(object):
 
                 dtype_refs = dict(dtype="Object Reference")
 
-                dset_chunks = chunks
+                dset_chunks = dset.chunks
 
             elif dset_type.get_class() == h5py.h5t.STD_REF_DSETREG:
                 print(f"Dataset {dset.name} is not processed: Region Reference dtype")
@@ -979,10 +1644,10 @@ class HDF5Zarr(object):
 
         else:
             if (self.max_chunksize is not None and compression is None and
-                    np.prod(dset.shape) != 0 and (chunks is None or chunks == dset.shape)):
+                    np.prod(dset.shape) != 0 and (dset.chunks is None or dset.chunks == dset.shape)):
 
-                dset_chunks = chunks if chunks else dset.shape
-                if dset.shape != () and np.prod(dset.shape) != 0:
+                dset_chunks = dset.chunks if dset.chunks else dset.shape
+                if dset.shape != () and dset.size != 0:
                     dset_chunks = list(dset_chunks)
                     dim_ = 0
                     ratio_ = self.max_chunksize/(np.prod(dset_chunks)*dset.dtype.itemsize)
@@ -997,7 +1662,7 @@ class HDF5Zarr(object):
                     dset_chunks = tuple(dset_chunks)
                 dset_chunks = dset_chunks or None
             else:
-                dset_chunks = chunks
+                dset_chunks = dset.chunks
                 if dset_chunks is None and np.prod(dset.shape) == 0:
                     dset_chunks = tuple(s if s != 0 else 1 for s in dset.shape)
 
@@ -1008,7 +1673,7 @@ class HDF5Zarr(object):
                                            compression=compression,
                                            overwrite=True)
 
-        info = self.storage_info(dset, dset_chunks, chunks)
+        info = self.storage_info(dset.id, dset_chunks, dset.chunks)
 
         # Store metadata
         if info:
@@ -1020,6 +1685,321 @@ class HDF5Zarr(object):
             if object_codec is not None:
                 info['source'].update({'type': 'vlen'})
             FileChunkStore.chunks_info(zarray, info)
+
+    def _copy_attrs_data_to_zarr_store(self, h5obj, zobj):
+        """ Convert hdf5 attributes to json compatible form and create zarr attributes
+        Args:
+            h5obj:   hdf5 object
+            zobj:    zarr object
+        """
+
+        try:
+            attrs = dict(h5obj.attrs)
+            zobj.attrs.put(attrs)
+            return
+        except Exception:
+            # iterate over attributes
+            pass
+
+        for key, val in h5obj.attrs.items():
+
+            # convert object references in attrs to str
+            # e.g. h5py.h5r.Reference instance to "/processing/ophys/ImageSegmentation/ImagingPlane"
+            if isinstance(val, str):
+                zobj.attrs[key] = val
+                continue
+
+            if isinstance(val, bytes):
+                val = val.decode('utf-8')
+            elif isinstance(val, np.bool_):
+                val = np.bool(val)
+            elif isinstance(val, (np.ndarray, np.number)):
+                if val.dtype.kind == 'S':
+                    val = np.char.decode(val, 'utf-8')
+                    val = val.tolist()
+                else:
+                    val = val.tolist()
+            elif isinstance(val, h5py.h5r.Reference):
+                if val:
+                    # not a null reference
+                    try:
+                        deref_id = h5py.h5r.dereference(val, self.file.id)
+                        objinfo = h5py.h5g.get_objinfo(deref_id)  # get_objinfo follow_link arg determines target of soft links
+                        objno = objinfo.objno
+                        if objno[0] in self._address_dict:
+                            deref_objname = self._address_dict[objno[0]]
+                        else:
+                            deref_objname = h5py.h5r.get_name(val, self.file.id)
+                            deref_objname = deref_objname.decode('utf-8')
+                    except:
+                        print(f"Attribute value of type {type(val)} is not processed: \
+                                Attribute {key} of object {h5obj.name}, unable to get target name")
+                        continue
+
+                    if deref_objname:
+                        val = '//' + deref_objname
+                    else:
+                        print(f"Attribute value of type {type(val)} is not processed: \
+                                Attribute {key} of object {h5obj.name}, anonymous target")
+                        continue
+                else:
+                    val = None
+            elif isinstance(val, h5py.h5r.RegionReference):
+                print(f"Attribute value of type {type(val)} is not processed: Attribute {key} of object {h5obj.name}")
+                continue
+
+            try:
+                zobj.attrs[key] = val
+            except Exception:
+                print(f"Attribute value of type {type(val)} is not processed: Attribute {key} of object {h5obj.name}")
+
+    @staticmethod
+    def _get_name(_filename, objname: bytes, hfid = None) -> str:
+        # returns string hardlink path of object name if symlink
+        if hfid is None:
+            hfid = HDF5Zarr._gethfile(_filename).id
+        if not (objname in (b'/',b'')):
+            link_info = hfid.links.get_info(objname)
+            if link_info.type == h5py.h5l.TYPE_SOFT:
+                _name = hfid.links.get_val(objname)
+                while _name != b'/' and hfid.links.get_info(_name).type == h5py.h5l.TYPE_SOFT:
+                    _name = hfid.links.get_val(_name)
+            else:
+                _name = objname
+        else:
+            _name = objname
+
+        _name = _name.decode('utf-8')
+        _name = _name if _name.startswith('/') else '/'+_name
+        return _name
+
+    @staticmethod
+    def copy_storeobj(store, x, y, copy_chunks_info = False):
+        """ copy store from location x to y
+        ----------
+        store : MutableMapping
+            Store for hdf5 object address information
+        x     : address to copy from, absolute
+        y     : valid target location, absolute
+        copy_chunks_info: copy chunks_meta_key from array, default False
+        """
+        x = PurePosixPath(normalize_storage_path(x))
+        y = PurePosixPath(normalize_storage_path(y))
+
+        # determine if copying array or group
+        if str(x/array_meta_key) in store:
+            meta_key = array_meta_key
+        elif str(x/group_meta_key) in store:
+            meta_key = group_meta_key
+        else:
+            raise KeyError(f"address {x} does not exist")
+        if str(y/array_meta_key) in store or str(y/group_meta_key) in store:
+            warn(f"overwriting target address {str(y)} already in zarr store")
+        # copy object
+        store[str(y/meta_key)]=store[str(x/meta_key)]
+        # copy attributes
+        xattrkey = str(x/attrs_key)
+        if xattrkey in store:
+            store[str(y/attrs_key)]=store[xattrkey]
+
+        if copy_chunks_info and meta_key == array_meta_key:
+            zchunksx = store[str(x/chunks_meta_key)]
+            zchunksx = FileChunkStore._ensure_dict(zchunksx)
+            store_item = {str(y/PurePosixPath(k).name) if k != 'source' else k: v for k, v in zchunksx.items()}
+
+            store[str(y/chunks_meta_key)] = json_dumps(store_item)
+
+    @staticmethod
+    def _create_zarr_dset(fid, uri, _hdf5_regfilters_subset, dsid, max_chunksize, name, len_iterchunks):
+        """  Scan hdf5 file and recursively create zarr attributes, groups and dataset structures for accessing data
+        """
+
+        zgroup = zarr.open(None, mode='a',path='/')
+        name = str('/'/PurePosixPath(normalize_storage_path(name)))
+        # number of filters
+        dcpl = dsid.get_create_plist()
+        nfilters = dcpl.get_nfilters()
+        if nfilters > 1:
+            # TO DO #
+            print(f"Dataset {name} with multiple filters is not processed")
+            return None
+        elif nfilters == 1:
+            # get first filter information
+            filter_tuple = dcpl.get_filter(0)
+            filter_code = filter_tuple[0]
+            if filter_code in _hdf5_regfilters_subset and _hdf5_regfilters_subset[filter_code] is not None:
+                # TO DO
+                if filter_code == 32001:
+                    # Blosc
+                    blosc_names = {0: 'blosclz', 1: 'lz4', 2: 'lz4hc', 3: 'snappy', 4: 'zlib', 5: 'zstd'}
+                    clevel, shuffle, cname_id = filter_tuple[2][-3:]
+                    cname = blosc_names[cname_id]
+                    compression = _hdf5_regfilters_subset[filter_code](cname=cname, clevel=clevel,
+                                                                            shuffle=shuffle)
+                else:
+                    compression = _hdf5_regfilters_subset[filter_code](level=filter_tuple[2])
+            else:
+                print(f"Dataset {name} with compression filter {filter_tuple[3]}, hdf5 filter number {filter_tuple[0]} is not processed:\
+                        no compatible zarr codec")
+                return None
+        else:
+            compression = None
+
+        object_codec = None
+        dtype_refs = None
+
+
+        try:
+            chunks = dcpl.get_chunk()
+        except:
+            chunks = None
+
+        fillvalue = np.ndarray(shape=(1,), dtype = dsid.dtype)
+        dcpl.get_fill_value(fillvalue)
+        fillvalue = fillvalue[0]
+        if dsid.dtype.names is not None:
+            # Structured array with Reference dtype
+            dset_type = dsid.get_type()
+            dt_nmembers = dset_type.get_nmembers()
+
+            dtype_ = []
+            dset_fillvalue = list(fillvalue)
+            for dt_i in range(dt_nmembers):
+                dtname = dsid.dtype.names[dt_i]
+                if dset_type.get_member_class(dt_i) == h5py.h5t.REFERENCE:
+                    dtype_ += [(dtname, object)]
+                    if fillvalue[dt_i]:
+                        dset_fillvalue[dt_i] = h5py.h5o.get_info(h5py.h5r.dereference(
+                                                                 fillvalue[dt_i], fid)).addr
+                    else:
+                        dset_fillvalue[dt_i] = 0
+                else:
+                    dtype_ += [(dtname, dsid.dtype.base[dt_i])]
+
+            # currently not using the fill value with structured array
+            # containing object, zarr v2.4.1, zarr PR 422
+            if all([dt != object for dtname, dt in dtype_]):
+                dset_fillvalue = fillvalue
+            else:
+                dset_fillvalue = None
+
+            dtype_ = np.dtype(dtype_)
+
+            zarray = zgroup.create_dataset(name, shape=dsid.shape,
+                                           dtype=dtype_,
+                                           chunks=chunks or False,
+                                           fill_value=dset_fillvalue,
+                                           compression=compression,
+                                           overwrite=True)
+
+            dtype_refs = [(dsid.dtype.names[i],
+                           "Object Reference" if dset_type.get_member_class(i) == h5py.h5t.REFERENCE else dsid.dtype[i].str)
+                          for i in range(dt_nmembers)]
+            dtype_refs = dict(dtype=dtype_refs)
+
+            dset_chunks = chunks
+
+        # variable-length Datasets
+        elif h5py.check_vlen_dtype(dsid.dtype):
+            if not h5py.check_string_dtype(dsid.dtype):
+                print(f"Dataset {name} is not processed: Variable-length dataset, not string")
+                return None
+            else:
+                object_codec = VLenHDF5String()
+                zarray = zgroup.create_dataset(name, shape=dsid.shape,
+                                               dtype=object,
+                                               chunks=chunks or False,
+                                               fill_value=fillvalue,
+                                               compression=compression,
+                                               overwrite=True,
+                                               object_codec=object_codec)
+                dset_chunks = chunks
+
+        elif dsid.dtype.hasobject:
+            # TO DO test #
+            dset_type = dsid.get_type()
+
+            if dset_type.get_class() == h5py.h5t.REFERENCE:
+                dtype_ = np.dtype('|O')
+
+                if fillvalue:
+                    dset_fillvalue = h5py.h5o.get_info([h5py.h5r.dereference(fillvalue, fid)]).addr
+                else:
+                    dset_fillvalue = None
+
+                zarray = zgroup.create_dataset(name, shape=dsid.shape,
+                                               dtype=dtype_,
+                                               chunks=chunks or False,
+                                               fill_value=dset_fillvalue,
+                                               compression=compression,
+                                               overwrite=True,
+                                               object_codec=numcodecs.AsType(encode_dtype='|O', decode_dtype='|O'))
+
+                dtype_refs = dict(dtype="Object Reference")
+
+                dset_chunks = chunks
+
+            elif dset_type.get_class() == h5py.h5t.STD_REF_DSETREG:
+                print(f"Dataset {name} is not processed: Region Reference dtype")
+                return None
+            else:
+                print(f"Dataset {name} is not processed: Object dtype")
+                return None
+
+        else:
+            if (max_chunksize is not None and compression is None and
+                    np.prod(dsid.shape) != 0 and (chunks is None or chunks == dsid.shape)):
+
+                dset_chunks = chunks if chunks else dsid.shape
+                if dsid.shape != () and np.prod(dsid.shape) != 0:
+                    dset_chunks = list(dset_chunks)
+                    dim_ = 0
+                    ratio_ = max_chunksize/(np.prod(dset_chunks)*dsid.dtype.itemsize)
+                    while ratio_ < 1:
+                        chunk_dim_ = int(ratio_*dset_chunks[dim_])
+                        chunk_dim_ = chunk_dim_ if chunk_dim_ else 1
+                        chunk_dim_ -= np.argmax(dset_chunks[dim_] % np.arange(chunk_dim_, chunk_dim_//2, -1))
+                        dset_chunks[dim_] = int(chunk_dim_)
+                        ratio_ = max_chunksize/(np.prod(dset_chunks)*dsid.dtype.itemsize)
+                        dim_ += 1
+
+                    dset_chunks = tuple(dset_chunks)
+                dset_chunks = dset_chunks or None
+            else:
+                dset_chunks = chunks
+                if dset_chunks is None and np.prod(dsid.shape) == 0:
+                    dset_chunks = tuple(s if s != 0 else 1 for s in dsid.shape)
+            zarray = zgroup.create_dataset(name, shape=dsid.shape,
+                                           dtype=dsid.dtype,
+                                           chunks=dset_chunks or False,
+                                           fill_value=fillvalue,
+                                           compression=compression,
+                                           overwrite=True)
+
+        info = HDF5Zarr.storage_info(dsid, dset_chunks, chunks, len_iterchunks)
+
+        # Store metadata
+        if isinstance(info, tuple):
+            _info = dict()
+            _info['source'] = {'uri': uri,
+                              'array_name': name}
+            if dtype_refs is not None:
+                _info['source'].update(dtype_refs)
+            if object_codec is not None:
+                _info['source'].update({'type': 'vlen'})
+            FileChunkStore.chunks_info(zarray, _info)
+            return zgroup, (name,)+info
+        if info:
+            info['source'] = {'uri': uri,
+                              'array_name': name}
+
+            if dtype_refs is not None:
+                info['source'].update(dtype_refs)
+            if object_codec is not None:
+                info['source'].update({'type': 'vlen'})
+            FileChunkStore.chunks_info(zarray, info)
+
+        return zgroup, None
 
     @staticmethod
     def _rewrite_vlen_to_fixed(h5py_group, changed_dsets={}):
@@ -1114,7 +2094,6 @@ def _path_to_prefix(path):
 chunks_meta_key = '.zchunkstore'
 reference_key = '.zrefstore'
 
-
 class FileChunkStore(MutableMapping):
     """A file as a chunk store.
     Zarr array chunks are all in a single file.
@@ -1150,6 +2129,45 @@ class FileChunkStore(MutableMapping):
     def source(self):
         """The file object where chunks are stored."""
         return self._source
+
+    @staticmethod
+    def _chunks_info_update(zarray, chunks_loc):
+        """Store chunks location information for a Zarr array.
+        Parameters
+        ----------
+        zarray : zarr.core.Array
+            Zarr array that will use the chunk data.
+        chunks_loc : dict
+            File storage information for the chunks belonging to the Zarr array.
+        """
+        if 'source' not in chunks_loc:
+            raise ValueError('Chunk source information missing')
+        if any([k not in chunks_loc['source'] for k in ('uri', 'array_name')]):
+            raise ValueError(
+                f'{chunks_loc["source"]}: Chunk source information incomplete')
+
+        key = _path_to_prefix(zarray.path) + chunks_meta_key
+        chunks_meta = dict()
+        for k, v in chunks_loc.items():
+            if k != 'source':
+                k = zarray._chunk_key(k)
+                if any([a not in v for a in ('offset', 'size')]):
+                    raise ValueError(
+                        f'{k}: Incomplete chunk location information')
+            chunks_meta[k] = v
+
+        # Store Zarr array chunk location metadata...
+        if key in zarray.store:
+            _chunkinfo = json_loads(zarray.store[key].decode('utf-8'))
+            _source = chunks_meta.pop('source')
+            if _source['array_name'] != _chunkinfo['source']['array_name'] or _source['uri'] != _chunkinfo['source']['uri']:
+                raise Exception
+            if len(_source) != 2:
+                raise Exception
+            _chunkinfo.update(chunks_meta)
+            zarray.store[key] = json_dumps(_chunkinfo)
+        else:
+            zarray.store[key] = json_dumps(chunks_meta)
 
     @staticmethod
     def chunks_info(zarray, chunks_loc):
@@ -1212,7 +2230,8 @@ class FileChunkStore(MutableMapping):
     def _get_chunkstore_key(self, chunk_key):
         return str(PurePosixPath(chunk_key).parent / chunks_meta_key)
 
-    def _ensure_dict(self, obj):
+    @staticmethod
+    def _ensure_dict(obj):
         if isinstance(obj, bytes):
             return json_loads(obj)
         else:
@@ -1229,6 +2248,7 @@ class FileChunkStore(MutableMapping):
         bytes
             Bytes of the requested chunk.
         """
+
         zchunk_key = self._get_chunkstore_key(chunk_key)
         try:
             zchunks = self._ensure_dict(self._store[zchunk_key])
@@ -1247,7 +2267,6 @@ class FileChunkStore(MutableMapping):
 
         # variable-length string
         if 'gcol_offsets' in chunk_loc or zchunks['source'].get('type') == 'vlen':
-
             data_array = np.frombuffer(bytes, dtype=self.dt_vlen)
             data_offsets = np.unique(data_array['address'])
             data_offsets.sort()
@@ -1380,6 +2399,9 @@ class FileChunkStore(MutableMapping):
 
     def _get_reference_key(self, chunk_key):
         return str(PurePosixPath(chunk_key).parent / reference_key)
+
+    def _get_attrs_key(self, chunk_key):
+        return str(PurePosixPath(chunk_key).parent / attrs_key)
 
     def __delitem__(self, chunk_key):
         raise RuntimeError(f'{chunk_key}: Cannot delete chunk')
