@@ -50,7 +50,12 @@ def pytest_addoption(parser):
         default=[],
         help="name of objects in file to test",
     )
-
+    parser.addoption(
+        "--withoutdask",
+        action="store_true",
+        default=False,
+        help="name of objects in file to test",
+    )
 
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
@@ -69,6 +74,7 @@ def pytest_generate_tests(metafunc):
     numsubgroup = metafunc.config.getoption('numsubgroup')
     numdset = metafunc.config.getoption('numdataset')
     objnames = metafunc.config.getoption('objnames')
+    withdask = not metafunc.config.getoption('withoutdask')
     cls = metafunc.cls
     if cls is None:
         return
@@ -85,6 +91,9 @@ def pytest_generate_tests(metafunc):
     cls.disable_max_chunksize = disable_max_chunksize
     cls.numsubgroup = numsubgroup
     cls.numdset = numdset
+    cls.dask = withdask
+    DEBUG=10
+    cls.dask_kwds = {'silence_logs': DEBUG}
     cls.objnames = [n.encode() for n in objnames]
     cls._testfilename = "_testfile"  # test file name for _testfile, only used if hdf5files_option is False
 
@@ -98,7 +107,8 @@ def pytest_generate_tests(metafunc):
     cls.ids_maxchunksize = [i+'-maxchunksize' for i in ids]*int(not disable_max_chunksize)*cls.num_maxchunksize
     ids += cls.ids_maxchunksize
     metafunc.module.confargs = (cls.hdf5files_option, cls.hdf5file_names, cls.ids_subgroup,
-                                cls.ids_dset, cls.ids_maxchunksize, cls._testfilename)
+                                cls.ids_dset, cls.ids_maxchunksize, cls._testfilename,
+                                cls.dask, cls.dask_kwds)
     if metafunc.definition.nodeid.rfind('TestHDF5Zarr') > 0:
         metafunc.fixturenames.append('fnum')
         metafunc.parametrize(argnames='fnum', argvalues=range(len(ids)), ids=ids, indirect=True)

@@ -6,6 +6,7 @@ import h5py
 from hdf5zarr import HDF5Zarr, open_as_zarr
 import pytest
 import itertools
+import logging
 
 
 class TestHDF5Zarr(object):
@@ -173,7 +174,9 @@ class TestHDF5Zarr(object):
                 if self.hfile.name == '/':
                     assert_array_equal(hval_str, zval)
                 else:
-                    assert_array_equal(np.frompyfunc(lambda x: x if x.startswith(self.hfile.name) else '', 1, 1)(hval_str), zval)
+                    # only check for items that are in hdf5group argument passed to hdf5zarr
+                    assert_array_equal(np.frompyfunc(lambda x: x if x.startswith(self.hfile.name) else '', 1, 1)(hval_str),
+                                       np.frompyfunc(lambda x: x if x.startswith(self.hfile.name) else '', 1, 1)(zval))
         self._visit_item(_test_dset_val)
 
     def test_dset_val_struct_dtype_noref(self):
@@ -209,8 +212,10 @@ class TestHDF5Zarr(object):
                         if self.hfile.name == '/':
                             assert_array_equal(hval_str, zval[dt_name])
                         else:
-                            assert_array_equal(np.frompyfunc(lambda x: x if x.startswith(self.hfile.name)
-                                                                         else '', 1, 1)(hval_str), zval[dt_name])
+                            # only check for items that are in hdf5group argument passed to hdf5zarr
+                            assert_array_equal(np.frompyfunc(lambda x: x if x.startswith(self.hfile.name) else '', 1, 1)(hval_str),
+                                               np.frompyfunc(lambda x: x if x.startswith(self.hfile.name) else '', 1, 1)(zval[dt_name]))
+
                     else:
                         assert_array_equal(hval[dt_name], zval[dt_name])
         self._visit_item(_test_dset_val)
@@ -240,7 +245,12 @@ class TestHDF5Zarr(object):
             for name in hobj.attrs:
                 hattr = hobj.attrs[name]
                 zattr = zobj.attrs[name]
-                assert_array_equal(zattr, hattr)
+                if isinstance(hattr, h5py.Reference):
+                    hattr_bytes = h5py.h5i.get_name(h5py.h5r.dereference(hattr, self.hfile.id))
+                    hattr_str = '//' + hattr_bytes.decode('utf-8')
+                    assert_array_equal(zattr, hattr_str)
+                else:
+                    assert_array_equal(zattr, hattr)
         self._visit_item(_test_read_attrs)
 
     # visit hdf5 items
@@ -413,13 +423,16 @@ class TestHDF5Zarr(object):
 class HDF5ZarrBase(object):
     """ Comparing HDF5Zarr read with h5py """
 
-    def __init__(self, hdf5files_option, hdf5file_names, ids_subgroup, ids_dset, ids_maxchunksize, _testfilename):
+    def __init__(self, hdf5files_option, hdf5file_names, ids_subgroup, ids_dset,
+                 ids_maxchunksize, _testfilename, withdask, dask_kwds):
         self.hdf5files_option = hdf5files_option
         self.hdf5file_names = hdf5file_names
         self.ids_subgroup = ids_subgroup
         self.ids_dset = ids_dset
         self.ids_maxchunksize = ids_maxchunksize
         self._testfilename = _testfilename
+        self.dask = withdask
+        self.dask_kwds = dask_kwds
         self.setup_class()
 
     def setup_class(cls):
@@ -465,13 +478,13 @@ class HDF5ZarrBase(object):
             cls.hdf5file_names = [cls._create_file(i) for i in cls.hdf5file_names]
             cls.file_list = [h5py.File(i, 'r') for i in cls.hdf5file_names]
 
-        cls.hdf5zarr_list = [HDF5Zarr(f.filename, max_chunksize=None) for f in cls.file_list]
+        cls.hdf5zarr_list = [HDF5Zarr(f.filename, max_chunksize=None, withdask=cls.dask, dask_kwds=cls.dask_kwds) for f in cls.file_list]
 
         # prepend _testfile if hdf5files are not specified
         if not cls.hdf5files_option:
             cls.hdf5file_names.insert(0, cls._testfile())
             cls.file_list.insert(0, h5py.File(cls.hdf5file_names[0], 'r'))
-            cls.hdf5zarr_list.insert(0, HDF5Zarr(cls.file_list[0].filename, max_chunksize=None))
+            cls.hdf5zarr_list.insert(0, HDF5Zarr(cls.file_list[0].filename, max_chunksize=None, withdask=cls.dask, dask_kwds=cls.dask_kwds))
 
         # track which temporary files are already saved.
         # if hdf5files_option is passed, mark them as already saved
@@ -509,7 +522,7 @@ class HDF5ZarrBase(object):
                 hdf5group = group_names[i//num_files if len(group_names) > i//num_files else -1]
             else:
                 hdf5group = None
-            cls.hdf5zarr_list.append(HDF5Zarr(file_item.filename, hdf5group=hdf5group))
+            cls.hdf5zarr_list.append(HDF5Zarr(file_item.filename, hdf5group=hdf5group, withdask=cls.dask, dask_kwds=cls.dask_kwds))
             cls.file_list.append(file_item[hdf5group or '/'])
 
         # len(cls.ids_datasets) == num_files*cls.numdatasets
@@ -521,7 +534,7 @@ class HDF5ZarrBase(object):
                 hdf5obj = dset_names[i//num_files if len(dset_names) > i//num_files else -1]
             else:
                 hdf5obj = None
-            cls.hdf5zarr_list.append(HDF5Zarr(file_item.filename, hdf5obj=hdf5obj))
+            cls.hdf5zarr_list.append(HDF5Zarr(file_item.filename, hdf5obj=hdf5obj, withdask=cls.dask, dask_kwds=cls.dask_kwds))
             cls.file_list.append(file_item[hdf5obj or '/'])
 
         # len(cls.ids_maxchunksize) == (num_files+num_files*cls.numsubgroup+cls.numdatasets)*cls.num_maxchunksize
@@ -531,7 +544,8 @@ class HDF5ZarrBase(object):
             item_name = cls.hdf5zarr_list[i%count].zgroup.name
             file_item = cls.file_list[i%count]
             max_chunksize = 1000 if not cls.hdf5files_option else 2**cls.srand.randint(18, 22)
-            cls.hdf5zarr_list.append(HDF5Zarr(file_item.file.filename, hdf5obj=item_name, max_chunksize=max_chunksize))
+            cls.hdf5zarr_list.append(HDF5Zarr(file_item.file.filename, hdf5obj=item_name,
+                                              max_chunksize=max_chunksize, withdask=cls.dask, dask_kwds=cls.dask_kwds))
             cls.file_list.append(file_item)
 
     def _create_file(cls, name):
@@ -913,9 +927,14 @@ def _gethfile(prefix: str = None):
     yield hfile
     hfile.close()
 
+@pytest.fixture(autouse=True)
+def wdask():
+    dask_kwds = {'silence_logs': logging.DEBUG}
+    return True, dask_kwds
 
-def test_maxchunksize(_gethfile):
+def test_maxchunksize(_gethfile, wdask):
     hfile =_gethfile
+    _dask, dask_kwds = wdask
 
     shape = (10,20,30,40)
     chunks = shape
@@ -928,19 +947,19 @@ def test_maxchunksize(_gethfile):
         chunks=chunks,
         )
     hfile.flush()
-    hdf5zarr = HDF5Zarr(hfile, hdf5obj=dsetname, max_chunksize=None)
+    hdf5zarr = HDF5Zarr(hfile, hdf5obj=dsetname, max_chunksize=None, withdask=_dask, dask_kwds=dask_kwds)
     zgroup = hdf5zarr.consolidate_metadata()
     assert_array_equal(zgroup[()],hfile[dsetname][()])
 
     max_chunksize = 2**10
-    hdf5zarr = HDF5Zarr(hfile, hdf5obj=dsetname, max_chunksize=max_chunksize)
+    hdf5zarr = HDF5Zarr(hfile, hdf5obj=dsetname, max_chunksize=max_chunksize, withdask=_dask, dask_kwds=dask_kwds)
     zgroup = hdf5zarr.consolidate_metadata()
-    print(zgroup.chunks)
     assert_array_equal(zgroup[()],hfile[dsetname][()])
 
-def test_maxchunksize_partial(_gethfile):
+def test_maxchunksize_partial(_gethfile, wdask):
     " where not all chunks are written"
     hfile =_gethfile
+    _dask, dask_kwds = wdask
 
     shape = (10,20,30,40)
     chunks = (2,4,6,8)
@@ -959,11 +978,11 @@ def test_maxchunksize_partial(_gethfile):
     data = np.random.randint(0, 10, size=dshape, dtype=np.uint8)
     dset[8:9,:,7:10,1:6]=data
     hfile.flush()
-    hdf5zarr = HDF5Zarr(hfile, hdf5obj=dsetname, max_chunksize=None)
+    hdf5zarr = HDF5Zarr(hfile, hdf5obj=dsetname, max_chunksize=None, withdask=_dask, dask_kwds=dask_kwds)
     zgroup = hdf5zarr.consolidate_metadata()
     assert_array_equal(zgroup[()],hfile[dsetname][()])
 
     max_chunksize = 2**10
-    hdf5zarr = HDF5Zarr(hfile, hdf5obj=dsetname, max_chunksize=max_chunksize)
+    hdf5zarr = HDF5Zarr(hfile, hdf5obj=dsetname, max_chunksize=max_chunksize, withdask=_dask, dask_kwds=dask_kwds)
     zgroup = hdf5zarr.consolidate_metadata()
     assert_array_equal(zgroup[()],hfile[dsetname][()])

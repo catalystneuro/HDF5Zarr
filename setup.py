@@ -3,13 +3,14 @@ from setuptools import setup, find_packages
 install_requires = ['numpy',
                     'cython',
                     'pkgconfig',
-                    'zarr>=2.4.0',
+                    'zarr>=2.4.0,<2.9.4',
                     'numcodecs',
                     'h5py>=3.0.0',
                     'fsspec',
                     's3fs',
                     'hdmf',
-                    'nwbwidgets']
+                    'nwbwidgets',
+                    'dask[distributed]']
 
 with open("README.md", "r") as fh:
     long_description = fh.read()
