@@ -4,46 +4,18 @@
 
 ## Installation:
 
-Requires latest dev installation of h5py, with HDF5>=1.10.5.
-
-### Install HDF5
-Check available HDF5 version:
-```bash
-$ h5cc -showconfig
-```
-
-##### Conda:
-``` bash
-$ conda install "hdf5>=1.10.5"
-```
-
-##### Source installation:
-Download and install [HDF5](https://www.hdfgroup.org/downloads/hdf5/)  
-e.g.
-```bash
-$ cd hdf5*/bin
-$ ./h5redeploy
-```
-
-### Install h5py
-Follow h5py instructions for [custom installation](https://h5py.readthedocs.io/en/stable/build.html#custom-installation)  
-For example:
-##### Conda:
-``` bash
-$ HDF5_DIR=$CONDA_PREFIX pip install --no-binary=h5py h5py
-```
-
-##### Source installation:
-```bash
-$ HDF5_DIR=/path/to/hdf5 pip install --no-binary=h5py h5py
-```
-
 ### Install HDF5Zarr
 
 ```bash
 $ pip install git+https://github.com/catalystneuro/HDF5Zarr.git
 ```
 
+## Limitations:
+  no big endian support currently.
+  no support when a chunk may have different compression than the dataset
+  no support for datasets with multiple compessors.
+  no support for external links
+  no support when fill values have object datatype
 
 ## Usage:
 
