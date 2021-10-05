@@ -167,7 +167,7 @@ class HDF5Zarr(object):
                  store: Union[MutableMapping, str, Path] = None, store_path: str = None,
                  store_mode: str = 'a', LRU: bool = False, LRU_max_size: int = 2**30,
                  max_chunksize=2*2**20, driver: str = None, blocksize: int = 2**15, collectrefs: Union[bool, str, list] = None,
-                 withdask: bool = True, dask_kwds: dict = {}, follow_symlinks: bool = True):
+                 withdask: bool = True, dask_kwds: dict = None, follow_symlinks: bool = True):
 
         """
         Args:
@@ -226,10 +226,12 @@ class HDF5Zarr(object):
                          'threads_per_worker': 1,
                          'worker_class': Worker, # turn off Nanny when processes == True
                          }
-            if not isinstance(dask_kwds, dict):
-                raise TypeError(f"Expected dict for dask_kwds, recieved {type(dask_kwds)}")
-            else:
+
+            if dask_kwds is not None:
+                if not isinstance(dask_kwds, dict):
+                    raise TypeError(f"Expected dict for dask_kwds, recieved {type(dask_kwds)}")
                 dask_opts.update(dask_kwds)
+
             cluster = LocalCluster(**dask_opts)  # start local workers as processes
             cluster.adapt(minimum = 1, minimum_cores = 1)
             self.client = Client(cluster)
@@ -409,6 +411,9 @@ class HDF5Zarr(object):
                     self.file = h5py.File(self.filename, mode='r')
                     if _cached:
                         self.filename.cache = _cache
+                elif driver and isinstance(self.filename, fsspec.spec.AbstractBufferedFile):
+                    self.filename = self.filename.full_name
+                    self.file = h5py.File(self.filename, mode='r', driver=driver)
                 else:
                     self.file = h5py.File(self.filename, mode='r', driver=driver)
 
